@@ -1,0 +1,95 @@
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=Plus+Jakarta+Sans:wght@400;500;700&display=swap');
+
+:root {
+  --font-display: 'Space Grotesk', sans-serif;
+  --font-body: 'Plus Jakarta Sans', sans-serif;
+  --accent: #9cdb78;
+  --accent-strong: #72bf52;
+}
+
+body[data-theme='dark'],
+:root {
+  --page-bg: #0b0f14;
+  --surface: rgba(16, 21, 29, 0.82);
+  --border: rgba(255, 255, 255, 0.08);
+  --heading: #f4f7f1;
+  --body: #c6d0cb;
+  --muted: #8a9690;
+  --shadow:
+    0 24px 80px rgba(0, 0, 0, 0.36),
+    0 8px 24px rgba(0, 0, 0, 0.26);
+  color: var(--body);
+  background:
+    radial-gradient(circle at top left, rgba(114, 191, 82, 0.18), transparent 28%),
+    radial-gradient(circle at top right, rgba(76, 123, 255, 0.14), transparent 26%),
+    linear-gradient(180deg, #0e131a 0%, #090c11 100%);
+}
+
+body[data-theme='light'] {
+  --page-bg: #f4efe4;
+  --surface: rgba(255, 251, 245, 0.9);
+  --border: rgba(35, 47, 41, 0.08);
+  --heading: #1f2a20;
+  --body: #3f4d44;
+  --muted: #6a776f;
+  --shadow:
+    0 24px 80px rgba(72, 61, 36, 0.08),
+    0 8px 24px rgba(30, 35, 24, 0.06);
+  color: var(--body);
+  background:
+    radial-gradient(circle at top left, rgba(248, 185, 77, 0.18), transparent 28%),
+    radial-gradient(circle at top right, rgba(112, 214, 195, 0.16), transparent 26%),
+    linear-gradient(180deg, #f6f2e8 0%, #efe8d8 100%);
+}
+
+:root,
+body {
+  font-family: var(--font-body);
+  line-height: 1.5;
+  font-weight: 500;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  background: var(--page-bg);
+}
+
+body,
+button,
+input,
+textarea {
+  font-family: var(--font-body);
+}
+
+button,
+input,
+textarea {
+  appearance: none;
+}
+
+img,
+svg {
+  display: block;
+  max-width: 100%;
+}
+
+a {
+  color: inherit;
+}
+
+#root {
+  min-height: 100vh;
+}
