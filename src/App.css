@@ -77,7 +77,8 @@
 .primary-button,
 .swatch,
 .check-button,
-.delete-button {
+.delete-button,
+.edit-button {
   transition:
     transform 180ms ease,
     background-color 180ms ease,
@@ -196,7 +197,8 @@
 }
 
 .habit-form label,
-.form-row label {
+.form-row label,
+.form-grid label {
   display: grid;
   gap: 8px;
 }
@@ -209,6 +211,7 @@
 }
 
 .habit-form input,
+.habit-form select,
 .note-box textarea {
   width: 100%;
   border: 1px solid rgba(255, 255, 255, 0.1);
@@ -224,6 +227,12 @@
   padding: 0 16px;
 }
 
+.habit-form select {
+  height: 48px;
+  padding: 0 16px;
+  appearance: none;
+}
+
 .habit-form input:focus,
 .note-box textarea:focus {
   outline: 2px solid rgba(132, 198, 79, 0.22);
@@ -234,6 +243,12 @@
   display: grid;
   grid-template-columns: 120px 1fr;
   gap: 12px;
+}
+
+.form-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
 }
 
 .swatches {
@@ -277,7 +292,8 @@
 .ghost-button:hover,
 .template-chip:hover,
 .check-button:hover,
-.delete-button:hover {
+.delete-button:hover,
+.edit-button:hover {
   transform: translateY(-1px);
 }
 
@@ -450,6 +466,58 @@
   background: rgba(255, 255, 255, 0.04);
   color: var(--muted);
   cursor: pointer;
+}
+
+.habit-actions,
+.mobile-habit-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.edit-button {
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--heading);
+  font: inherit;
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+}
+
+.time-cell {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 32px;
+}
+
+.time-cell input,
+.mobile-time-entry input {
+  width: 70px;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--heading);
+  font: inherit;
+  text-align: center;
+  box-sizing: border-box;
+}
+
+.time-cell span,
+.mobile-time-entry span {
+  color: var(--muted);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
 }
 
 .tracker-table tfoot td {
@@ -651,12 +719,16 @@
   color: var(--heading);
   font: inherit;
   text-align: left;
-  cursor: pointer;
+  cursor: default;
 }
 
 .mobile-habit-row.checked {
   border-color: rgba(152, 214, 108, 0.42);
   background: rgba(152, 214, 108, 0.08);
+}
+
+.mobile-habit-row.time {
+  cursor: default;
 }
 
 .mobile-habit-label {
@@ -696,6 +768,13 @@
   border-color: var(--accent-strong);
 }
 
+.mobile-time-entry {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
 input::placeholder,
 textarea::placeholder {
   color: rgba(198, 208, 203, 0.55);
@@ -725,8 +804,12 @@ body[data-theme='light'] .mobile-day-chip,
 body[data-theme='light'] .mobile-habit-row,
 body[data-theme='light'] .mobile-habit-toggle,
 body[data-theme='light'] .delete-button,
+body[data-theme='light'] .edit-button,
 body[data-theme='light'] .check-button,
+body[data-theme='light'] .time-cell input,
+body[data-theme='light'] .mobile-time-entry input,
 body[data-theme='light'] .habit-form input,
+body[data-theme='light'] .habit-form select,
 body[data-theme='light'] .note-box textarea {
   background: rgba(255, 255, 255, 0.84);
   border-color: rgba(35, 47, 41, 0.1);
@@ -847,5 +930,18 @@ body[data-theme='light'] .check-button {
 
   .form-row {
     grid-template-columns: 1fr;
+  }
+
+  .form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .time-cell {
+    gap: 4px;
+  }
+
+  .time-cell input,
+  .mobile-time-entry input {
+    width: 64px;
   }
 }

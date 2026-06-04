@@ -14,6 +14,99 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false },
 })
 
+function normalizeHabitEntry(value, trackingMode) {
+  if (trackingMode === 'time') {
+    const numericValue =
+      typeof value === 'number' ? value : typeof value === 'string' && value.trim() ? Number(value) : Number.NaN
+
+    if (Number.isFinite(numericValue) && numericValue >= 0) {
+      return numericValue
+    }
+
+    return undefined
+  }
+
+  return value ? true : undefined
+}
+
+function inferTrackingMode(input) {
+  if (input.trackingMode === 'time' || input.type === 'time' || input.mode === 'time') {
+    return 'time'
+  }
+
+  const entries = input.entries ?? input.completions
+  if (entries && typeof entries === 'object' && !Array.isArray(entries)) {
+    return Object.values(entries).some((value) => typeof value === 'number') ? 'time' : 'check'
+  }
+
+  return 'check'
+}
+
+function normalizeHabit(input) {
+  if (!input || typeof input !== 'object') {
+    return null
+  }
+
+  const id = typeof input.id === 'string' && input.id.trim() ? input.id : null
+  const name = typeof input.name === 'string' && input.name.trim() ? input.name.trim() : null
+  if (!id || !name) {
+    return null
+  }
+
+  const trackingMode = inferTrackingMode(input)
+  const rawTargetValue = input.targetValue ?? input.goalValue ?? input.targetMinutes
+  const targetValue = typeof rawTargetValue === 'number' && Number.isFinite(rawTargetValue) && rawTargetValue > 0 ? rawTargetValue : null
+  const targetUnit =
+    typeof input.targetUnit === 'string' && input.targetUnit.trim()
+      ? input.targetUnit.trim()
+      : trackingMode === 'time'
+        ? 'min'
+        : 'check-ins'
+  const rawEntries = input.entries ?? input.completions
+  const entries = {}
+
+  if (rawEntries && typeof rawEntries === 'object' && !Array.isArray(rawEntries)) {
+    for (const [dateKey, value] of Object.entries(rawEntries)) {
+      const normalizedEntry = normalizeHabitEntry(value, trackingMode)
+      if (normalizedEntry !== undefined) {
+        entries[dateKey] = normalizedEntry
+      }
+    }
+  }
+
+  return {
+    id,
+    name,
+    icon: typeof input.icon === 'string' && input.icon.trim() ? input.icon.trim() : '✨',
+    color: typeof input.color === 'string' && input.color.trim() ? input.color.trim() : '#98d66c',
+    trackingMode,
+    targetValue,
+    targetUnit,
+    entries,
+    createdAt: typeof input.createdAt === 'string' ? input.createdAt : new Date().toISOString(),
+  }
+}
+
+function normalizeState(input) {
+  if (!input || typeof input !== 'object') {
+    return null
+  }
+
+  if (!Array.isArray(input.habits) || typeof input.notes !== 'object' || !input.notes) {
+    return null
+  }
+
+  const habits = input.habits.map(normalizeHabit).filter(Boolean)
+  if (habits.length === 0) {
+    return null
+  }
+
+  return {
+    habits,
+    notes: input.notes,
+  }
+}
+
 const DEFAULT_STATE = {
   habits: [
     {
@@ -21,7 +114,10 @@ const DEFAULT_STATE = {
       name: 'Wake up early',
       icon: '⏰',
       color: '#98d66c',
-      completions: {},
+      trackingMode: 'check',
+      targetValue: null,
+      targetUnit: 'check-ins',
+      entries: {},
       createdAt: new Date().toISOString(),
     },
     {
@@ -29,7 +125,10 @@ const DEFAULT_STATE = {
       name: 'Workout',
       icon: '💪',
       color: '#f8b94d',
-      completions: {},
+      trackingMode: 'check',
+      targetValue: null,
+      targetUnit: 'check-ins',
+      entries: {},
       createdAt: new Date().toISOString(),
     },
     {
@@ -37,7 +136,10 @@ const DEFAULT_STATE = {
       name: 'Reading',
       icon: '📚',
       color: '#70d6c3',
-      completions: {},
+      trackingMode: 'check',
+      targetValue: null,
+      targetUnit: 'check-ins',
+      entries: {},
       createdAt: new Date().toISOString(),
     },
     {
@@ -45,7 +147,21 @@ const DEFAULT_STATE = {
       name: 'Deep work',
       icon: '🎯',
       color: '#ff8a72',
-      completions: {},
+      trackingMode: 'check',
+      targetValue: null,
+      targetUnit: 'check-ins',
+      entries: {},
+      createdAt: new Date().toISOString(),
+    },
+    {
+      id: 'study',
+      name: 'Study',
+      icon: '📖',
+      color: '#87a7ff',
+      trackingMode: 'time',
+      targetValue: 90,
+      targetUnit: 'min',
+      entries: {},
       createdAt: new Date().toISOString(),
     },
   ],
@@ -53,6 +169,7 @@ const DEFAULT_STATE = {
 }
 
 async function ensureSchema() {
+  const normalizedDefaultState = normalizeState(DEFAULT_STATE) ?? DEFAULT_STATE
   await pool.query(`
     CREATE TABLE IF NOT EXISTS habit_tracker_state (
       id TEXT PRIMARY KEY,
@@ -65,7 +182,7 @@ async function ensureSchema() {
   if (existing.rowCount === 0) {
     await pool.query(
       'INSERT INTO habit_tracker_state (id, payload) VALUES ($1, $2)',
-      ['singleton', DEFAULT_STATE],
+      ['singleton', normalizedDefaultState],
     )
   }
 }
@@ -80,8 +197,9 @@ async function readState() {
     return { payload: DEFAULT_STATE, updatedAt: null }
   }
 
+  const normalized = normalizeState(result.rows[0].payload)
   return {
-    payload: result.rows[0].payload ?? DEFAULT_STATE,
+    payload: normalized ?? result.rows[0].payload ?? DEFAULT_STATE,
     updatedAt: result.rows[0].updated_at,
   }
 }
@@ -89,6 +207,7 @@ async function readState() {
 function writeJson(res, statusCode, body) {
   res.writeHead(statusCode, {
     'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'no-store',
   })
   res.end(JSON.stringify(body))
 }
@@ -107,16 +226,6 @@ function readBody(req) {
     })
     req.on('error', reject)
   })
-}
-
-function isTrackerState(value) {
-  return (
-    value &&
-    typeof value === 'object' &&
-    Array.isArray(value.habits) &&
-    value.notes &&
-    typeof value.notes === 'object'
-  )
 }
 
 await ensureSchema()
@@ -142,7 +251,8 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'PUT' && req.url === '/api/state') {
       const body = await readBody(req)
-      if (!isTrackerState(body)) {
+      const normalizedBody = normalizeState(body)
+      if (!normalizedBody) {
         writeJson(res, 400, { error: 'Invalid state payload' })
         return
       }
@@ -154,7 +264,7 @@ const server = http.createServer(async (req, res) => {
         WHERE id = $1
         RETURNING payload, updated_at
         `,
-        ['singleton', body],
+        ['singleton', normalizedBody],
       )
 
       writeJson(res, 200, result.rows[0])

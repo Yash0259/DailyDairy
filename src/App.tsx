@@ -1,12 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 
+type HabitTrackingMode = 'check' | 'time'
+
+type HabitEntry = boolean | number
+
 type Habit = {
   id: string
   name: string
   icon: string
   color: string
-  completions: Record<string, boolean>
+  trackingMode: HabitTrackingMode
+  targetValue: number | null
+  targetUnit: string
+  entries: Record<string, HabitEntry>
   createdAt: string
 }
 
@@ -19,6 +26,18 @@ type HabitTemplate = {
   name: string
   icon: string
   color: string
+  trackingMode?: HabitTrackingMode
+  targetValue?: number | null
+  targetUnit?: string
+}
+
+type HabitFormState = {
+  name: string
+  icon: string
+  color: string
+  trackingMode: HabitTrackingMode
+  targetValue: string
+  targetUnit: string
 }
 
 type BackendStatus = 'loading' | 'connected' | 'saving' | 'offline'
@@ -26,14 +45,16 @@ type ThemeMode = 'dark' | 'light'
 
 const STORAGE_KEY = 'habit-tracker-local-cache'
 const THEME_KEY = 'habit-tracker-theme'
+const SYNC_POLL_INTERVAL_MS = 5000
 const COLOR_SWATCHES = ['#98d66c', '#f8b94d', '#ff8a72', '#70d6c3', '#87a7ff', '#e58dff']
 const TODAY = new Date()
 
 const HABIT_TEMPLATES: HabitTemplate[] = [
-  { name: 'Wake up early', icon: '⏰', color: '#98d66c' },
-  { name: 'Workout', icon: '💪', color: '#f8b94d' },
-  { name: 'Reading', icon: '📚', color: '#70d6c3' },
-  { name: 'Deep work', icon: '🎯', color: '#ff8a72' },
+  { name: 'Wake up early', icon: '⏰', color: '#98d66c', trackingMode: 'check' },
+  { name: 'Workout', icon: '💪', color: '#f8b94d', trackingMode: 'check' },
+  { name: 'Reading', icon: '📚', color: '#70d6c3', trackingMode: 'check' },
+  { name: 'Deep work', icon: '🎯', color: '#ff8a72', trackingMode: 'check' },
+  { name: 'Study', icon: '📖', color: '#87a7ff', trackingMode: 'time', targetValue: 90, targetUnit: 'min' },
 ]
 
 function pad(value: number) {
@@ -50,17 +71,135 @@ function createHabit(template: HabitTemplate): Habit {
     name: template.name,
     icon: template.icon,
     color: template.color,
-    completions: {},
+    trackingMode: template.trackingMode ?? 'check',
+    targetValue: template.targetValue ?? null,
+    targetUnit: template.targetUnit ?? (template.trackingMode === 'time' ? 'min' : 'check-ins'),
+    entries: {},
     createdAt: new Date().toISOString(),
   }
 }
 
-function getDefaultState(): PersistedState {
+function getDefaultHabitForm(): HabitFormState {
   return {
-    habits: HABIT_TEMPLATES.map(createHabit),
-    notes: {
-      [formatDateKey(TODAY)]: 'Focus on consistency before intensity.',
-    },
+    name: '',
+    icon: '✨',
+    color: COLOR_SWATCHES[0],
+    trackingMode: 'check',
+    targetValue: '60',
+    targetUnit: 'min',
+  }
+}
+
+function getHabitFormFromHabit(habit: Habit): HabitFormState {
+  return {
+    name: habit.name,
+    icon: habit.icon,
+    color: habit.color,
+    trackingMode: habit.trackingMode,
+    targetValue: String(habit.targetValue ?? 60),
+    targetUnit: habit.targetUnit || (habit.trackingMode === 'time' ? 'min' : 'check-ins'),
+  }
+}
+
+function normalizeHabitEntry(value: unknown, trackingMode: HabitTrackingMode) {
+  if (trackingMode === 'time') {
+    const numericValue =
+      typeof value === 'number' ? value : typeof value === 'string' && value.trim() ? Number(value) : Number.NaN
+
+    if (Number.isFinite(numericValue) && numericValue >= 0) {
+      return numericValue
+    }
+
+    return undefined
+  }
+
+  return value ? true : undefined
+}
+
+function coerceHabitEntriesToMode(entries: Record<string, HabitEntry>, trackingMode: HabitTrackingMode) {
+  const nextEntries: Record<string, HabitEntry> = {}
+
+  for (const [dateKey, value] of Object.entries(entries)) {
+    if (trackingMode === 'time') {
+      if (typeof value === 'number') {
+        nextEntries[dateKey] = value
+      } else if (value) {
+        nextEntries[dateKey] = 1
+      }
+      continue
+    }
+
+    if (value) {
+      nextEntries[dateKey] = true
+    }
+  }
+
+  return nextEntries
+}
+
+function inferTrackingMode(input: Record<string, unknown>) {
+  if (input.trackingMode === 'time' || input.type === 'time' || input.mode === 'time') {
+    return 'time' as const
+  }
+
+  const entries = input.entries ?? input.completions
+  if (entries && typeof entries === 'object' && !Array.isArray(entries)) {
+    return Object.values(entries as Record<string, unknown>).some((value) => typeof value === 'number')
+      ? ('time' as const)
+      : ('check' as const)
+  }
+
+  return 'check' as const
+}
+
+function normalizeHabit(input: unknown): Habit | null {
+  if (!input || typeof input !== 'object') {
+    return null
+  }
+
+  const candidate = input as Record<string, unknown>
+  const id = typeof candidate.id === 'string' && candidate.id.trim() ? candidate.id : null
+  const name = typeof candidate.name === 'string' && candidate.name.trim() ? candidate.name.trim() : null
+  const icon = typeof candidate.icon === 'string' && candidate.icon.trim() ? candidate.icon.trim() : '✨'
+  const color = typeof candidate.color === 'string' && candidate.color.trim() ? candidate.color.trim() : COLOR_SWATCHES[0]
+  const trackingMode = inferTrackingMode(candidate)
+  const rawTargetValue = candidate.targetValue ?? candidate.goalValue ?? candidate.targetMinutes
+  const targetValue =
+    typeof rawTargetValue === 'number' && Number.isFinite(rawTargetValue) && rawTargetValue > 0
+      ? rawTargetValue
+      : null
+  const targetUnit =
+    typeof candidate.targetUnit === 'string' && candidate.targetUnit.trim()
+      ? candidate.targetUnit.trim()
+      : trackingMode === 'time'
+        ? 'min'
+        : 'check-ins'
+  const rawEntries = candidate.entries ?? candidate.completions
+  const entries: Record<string, HabitEntry> = {}
+
+  if (rawEntries && typeof rawEntries === 'object' && !Array.isArray(rawEntries)) {
+    for (const [dateKey, value] of Object.entries(rawEntries as Record<string, unknown>)) {
+      const normalizedEntry = normalizeHabitEntry(value, trackingMode)
+      if (normalizedEntry !== undefined) {
+        entries[dateKey] = normalizedEntry
+      }
+    }
+  }
+
+  if (!id || !name) {
+    return null
+  }
+
+  return {
+    id,
+    name,
+    icon,
+    color,
+    trackingMode,
+    targetValue,
+    targetUnit,
+    entries,
+    createdAt: typeof candidate.createdAt === 'string' ? candidate.createdAt : new Date().toISOString(),
   }
 }
 
@@ -74,9 +213,23 @@ function normalizeState(input: unknown): PersistedState {
     return getDefaultState()
   }
 
+  const habits = candidate.habits.map(normalizeHabit).filter((habit): habit is Habit => habit !== null)
+  if (habits.length === 0) {
+    return getDefaultState()
+  }
+
   return {
-    habits: candidate.habits.filter(Boolean) as Habit[],
+    habits,
     notes: candidate.notes as Record<string, string>,
+  }
+}
+
+function getDefaultState(): PersistedState {
+  return {
+    habits: HABIT_TEMPLATES.map(createHabit),
+    notes: {
+      [formatDateKey(TODAY)]: 'Focus on consistency before intensity.',
+    },
   }
 }
 
@@ -107,7 +260,9 @@ function loadThemePreference(): ThemeMode {
 }
 
 async function fetchStateFromServer() {
-  const response = await fetch('/api/state')
+  const response = await fetch('/api/state', {
+    cache: 'no-store',
+  })
   if (!response.ok) {
     throw new Error(`Failed to load state (${response.status})`)
   }
@@ -121,6 +276,7 @@ async function saveStateToServer(state: PersistedState) {
     headers: {
       'content-type': 'application/json',
     },
+    cache: 'no-store',
     body: JSON.stringify(state),
   })
 
@@ -138,7 +294,180 @@ function buildMonthDays(monthAnchor: Date) {
 }
 
 function countHabitDone(habit: Habit, dateKeys: string[]) {
-  return dateKeys.reduce((total, dateKey) => total + (habit.completions[dateKey] ? 1 : 0), 0)
+  return dateKeys.reduce((total, dateKey) => total + (isHabitComplete(habit, dateKey) ? 1 : 0), 0)
+}
+
+function cloneHabit(habit: Habit): Habit {
+  return {
+    ...habit,
+    entries: { ...habit.entries },
+  }
+}
+
+function cloneState(state: PersistedState): PersistedState {
+  return {
+    habits: state.habits.map(cloneHabit),
+    notes: { ...state.notes },
+  }
+}
+
+function stableSerialize(value: unknown): string {
+  if (value === null) {
+    return 'null'
+  }
+
+  switch (typeof value) {
+    case 'string':
+      return JSON.stringify(value)
+    case 'number':
+      return Number.isFinite(value) ? String(value) : 'null'
+    case 'boolean':
+      return value ? 'true' : 'false'
+    case 'bigint':
+      return JSON.stringify(value.toString())
+    case 'undefined':
+      return 'null'
+    case 'object':
+      if (Array.isArray(value)) {
+        return `[${value.map((item) => stableSerialize(item)).join(',')}]`
+      }
+
+      return `{${Object.entries(value)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, entryValue]) => `${JSON.stringify(key)}:${stableSerialize(entryValue)}`)
+        .join(',')}}`
+    default:
+      return 'null'
+  }
+}
+
+function statesEqual(left: PersistedState, right: PersistedState) {
+  return stableSerialize(left) === stableSerialize(right)
+}
+
+function mergeHabit(baseHabit: Habit, localHabit: Habit, remoteHabit: Habit) {
+  const mergedHabit = cloneHabit(remoteHabit)
+
+  if (localHabit.name !== baseHabit.name) {
+    mergedHabit.name = localHabit.name
+  }
+
+  if (localHabit.icon !== baseHabit.icon) {
+    mergedHabit.icon = localHabit.icon
+  }
+
+  if (localHabit.color !== baseHabit.color) {
+    mergedHabit.color = localHabit.color
+  }
+
+  if (localHabit.createdAt !== baseHabit.createdAt) {
+    mergedHabit.createdAt = localHabit.createdAt
+  }
+
+  if (localHabit.trackingMode !== baseHabit.trackingMode) {
+    mergedHabit.trackingMode = localHabit.trackingMode
+  }
+
+  if (localHabit.targetValue !== baseHabit.targetValue) {
+    mergedHabit.targetValue = localHabit.targetValue
+  }
+
+  if (localHabit.targetUnit !== baseHabit.targetUnit) {
+    mergedHabit.targetUnit = localHabit.targetUnit
+  }
+
+  const entryKeys = new Set([
+    ...Object.keys(baseHabit.entries),
+    ...Object.keys(localHabit.entries),
+  ])
+
+  for (const dateKey of entryKeys) {
+    if (localHabit.entries[dateKey] !== baseHabit.entries[dateKey]) {
+      if (localHabit.entries[dateKey] === undefined) {
+        delete mergedHabit.entries[dateKey]
+      } else {
+        mergedHabit.entries[dateKey] = localHabit.entries[dateKey]
+      }
+    }
+  }
+
+  return mergedHabit
+}
+
+function mergeStates(baseState: PersistedState, localState: PersistedState, remoteState: PersistedState) {
+  const mergedState = cloneState(remoteState)
+  const baseHabits = new Map(baseState.habits.map((habit) => [habit.id, habit]))
+  const localHabits = new Map(localState.habits.map((habit) => [habit.id, habit]))
+  const mergedHabitIndex = new Map(mergedState.habits.map((habit, index) => [habit.id, index]))
+
+  for (const [noteKey, noteValue] of Object.entries(localState.notes)) {
+    if (noteValue !== baseState.notes[noteKey]) {
+      mergedState.notes[noteKey] = noteValue
+    }
+  }
+
+  for (const localHabit of localState.habits) {
+    const baseHabit = baseHabits.get(localHabit.id)
+    const mergedIndex = mergedHabitIndex.get(localHabit.id)
+
+    if (!baseHabit) {
+      if (mergedIndex === undefined) {
+        mergedState.habits.push(cloneHabit(localHabit))
+      }
+      continue
+    }
+
+    if (mergedIndex === undefined) {
+      mergedState.habits.push(cloneHabit(localHabit))
+      continue
+    }
+
+    const remoteHabit = mergedState.habits[mergedIndex]
+    mergedState.habits[mergedIndex] = mergeHabit(baseHabit, localHabit, remoteHabit)
+  }
+
+  mergedState.habits = mergedState.habits.filter((habit) => localHabits.has(habit.id) || !baseHabits.has(habit.id))
+
+  return mergedState
+}
+
+function getHabitEntry(habit: Habit, dateKey: string) {
+  return habit.entries[dateKey]
+}
+
+function getHabitCompletionRatio(habit: Habit, dateKey: string) {
+  const entry = getHabitEntry(habit, dateKey)
+
+  if (habit.trackingMode === 'time') {
+    if (typeof entry !== 'number' || entry <= 0) {
+      return 0
+    }
+
+    if (habit.targetValue && habit.targetValue > 0) {
+      return Math.min(entry / habit.targetValue, 1)
+    }
+
+    return 1
+  }
+
+  return entry ? 1 : 0
+}
+
+function isHabitComplete(habit: Habit, dateKey: string) {
+  return getHabitCompletionRatio(habit, dateKey) >= 1
+}
+
+function getHabitRecordedAmount(habit: Habit, dateKey: string) {
+  const entry = getHabitEntry(habit, dateKey)
+  if (habit.trackingMode === 'time') {
+    return typeof entry === 'number' ? entry : 0
+  }
+
+  return entry ? 1 : 0
+}
+
+function formatAmount(value: number) {
+  return Number.isInteger(value) ? String(value) : value.toFixed(1)
 }
 
 function ProgressChart({ values }: { values: number[] }) {
@@ -181,16 +510,24 @@ function ProgressChart({ values }: { values: number[] }) {
 }
 
 function App() {
-  const [storedState, setStoredState] = useState<PersistedState>(() => loadCachedState())
+  const initialCachedState = useMemo(() => loadCachedState(), [])
+  const [storedState, setStoredState] = useState<PersistedState>(initialCachedState)
   const [monthAnchor, setMonthAnchor] = useState(() => new Date(TODAY.getFullYear(), TODAY.getMonth(), 1))
   const [selectedDateKey, setSelectedDateKey] = useState(() => formatDateKey(TODAY))
-  const [form, setForm] = useState({ name: '', icon: '✨', color: COLOR_SWATCHES[0] })
+  const [form, setForm] = useState<HabitFormState>(() => getDefaultHabitForm())
+  const [editingHabitId, setEditingHabitId] = useState<string | null>(null)
   const [backendStatus, setBackendStatus] = useState<BackendStatus>('loading')
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => loadThemePreference())
   const [hydrated, setHydrated] = useState(false)
+  const storedStateRef = useRef(initialCachedState)
+  const lastSyncedStateRef = useRef(initialCachedState)
   const saveTimer = useRef<number | null>(null)
   const hasSyncedOnce = useRef(false)
   const backendStatusRef = useRef<BackendStatus>('loading')
+  const saveInFlightRef = useRef(false)
+  const saveQueuedRef = useRef(false)
+  const localChangePendingRef = useRef(false)
+  const controlPanelRef = useRef<HTMLElement | null>(null)
 
   const todayKey = formatDateKey(TODAY)
   const monthDays = useMemo(() => buildMonthDays(monthAnchor), [monthAnchor])
@@ -203,6 +540,7 @@ function App() {
     () => monthDays.find((day) => formatDateKey(day) === selectedDateKey) ?? monthDays[0] ?? TODAY,
     [monthDays, selectedDateKey],
   )
+  const activeSelectedDateKey = useMemo(() => formatDateKey(selectedDay), [selectedDay])
   const selectedDateLabel = useMemo(
     () =>
       new Intl.DateTimeFormat('en-US', {
@@ -213,8 +551,8 @@ function App() {
     [selectedDay],
   )
   const selectedDateDone = useMemo(
-    () => storedState.habits.filter((habit) => habit.completions[selectedDateKey]).length,
-    [selectedDateKey, storedState.habits],
+    () => storedState.habits.filter((habit) => isHabitComplete(habit, activeSelectedDateKey)).length,
+    [activeSelectedDateKey, storedState.habits],
   )
 
   useEffect(() => {
@@ -224,7 +562,18 @@ function App() {
   }, [themeMode])
 
   useEffect(() => {
+    storedStateRef.current = storedState
+  }, [storedState])
+
+  useEffect(() => {
     let active = true
+
+    function applyRemoteState(remoteState: PersistedState) {
+      lastSyncedStateRef.current = remoteState
+      localChangePendingRef.current = false
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(remoteState))
+      setStoredState((current) => (statesEqual(current, remoteState) ? current : remoteState))
+    }
 
     async function bootstrap() {
       try {
@@ -233,9 +582,8 @@ function App() {
           return
         }
 
-        setStoredState(remoteState)
+        applyRemoteState(remoteState)
         setBackendStatus('connected')
-        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(remoteState))
       } catch {
         if (!active) {
           return
@@ -258,11 +606,62 @@ function App() {
   }, [])
 
   useEffect(() => {
-    const monthDateKey = formatDateKey(selectedDay)
-    if (selectedDateKey !== monthDateKey) {
-      setSelectedDateKey(monthDateKey)
+    if (!hydrated) {
+      return
     }
-  }, [monthDays, selectedDateKey, selectedDay])
+
+    let active = true
+
+    async function refreshFromServer() {
+      if (saveInFlightRef.current || localChangePendingRef.current) {
+        return
+      }
+
+      try {
+        const remoteState = await fetchStateFromServer()
+        if (!active) {
+          return
+        }
+
+        if (!statesEqual(remoteState, lastSyncedStateRef.current)) {
+          lastSyncedStateRef.current = remoteState
+          window.localStorage.setItem(STORAGE_KEY, JSON.stringify(remoteState))
+          setStoredState((current) => (statesEqual(current, remoteState) ? current : remoteState))
+        }
+
+        setBackendStatus('connected')
+      } catch {
+        if (active) {
+          setBackendStatus('offline')
+        }
+      }
+    }
+
+    const intervalId = window.setInterval(() => {
+      void refreshFromServer()
+    }, SYNC_POLL_INTERVAL_MS)
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        void refreshFromServer()
+      }
+    }
+
+    const handleFocus = () => {
+      void refreshFromServer()
+    }
+
+    document.addEventListener('visibilitychange', handleVisibility)
+    window.addEventListener('focus', handleFocus)
+    void refreshFromServer()
+
+    return () => {
+      active = false
+      window.clearInterval(intervalId)
+      document.removeEventListener('visibilitychange', handleVisibility)
+      window.removeEventListener('focus', handleFocus)
+    }
+  }, [hydrated])
 
   useEffect(() => {
     backendStatusRef.current = backendStatus
@@ -275,24 +674,62 @@ function App() {
 
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(storedState))
 
+    if (statesEqual(storedState, lastSyncedStateRef.current)) {
+      return
+    }
+
+    localChangePendingRef.current = true
+
     if (saveTimer.current !== null) {
       window.clearTimeout(saveTimer.current)
     }
 
     saveTimer.current = window.setTimeout(() => {
-      if (backendStatusRef.current === 'offline') {
+      if (saveInFlightRef.current) {
+        saveQueuedRef.current = true
         return
       }
 
-      setBackendStatus('saving')
-      void saveStateToServer(storedState)
-        .then(() => {
+      const flushSave = async () => {
+        if (backendStatusRef.current === 'offline') {
+          setBackendStatus('saving')
+        } else {
+          setBackendStatus('saving')
+        }
+
+        saveInFlightRef.current = true
+
+        try {
+          const baseState = lastSyncedStateRef.current
+          const latestRemoteState = await fetchStateFromServer()
+          const mergedState = mergeStates(baseState, storedStateRef.current, latestRemoteState)
+
+          await saveStateToServer(mergedState)
+
           hasSyncedOnce.current = true
+          lastSyncedStateRef.current = mergedState
+          localChangePendingRef.current = false
+          window.localStorage.setItem(STORAGE_KEY, JSON.stringify(mergedState))
+          setStoredState((current) => (statesEqual(current, mergedState) ? current : mergedState))
           setBackendStatus('connected')
-        })
-        .catch(() => {
+        } catch {
           setBackendStatus('offline')
-        })
+        } finally {
+          saveInFlightRef.current = false
+
+          if (saveQueuedRef.current) {
+            saveQueuedRef.current = false
+
+            if (!statesEqual(storedStateRef.current, lastSyncedStateRef.current)) {
+              saveTimer.current = window.setTimeout(() => {
+                void flushSave()
+              }, 0)
+            }
+          }
+        }
+      }
+
+      void flushSave()
     }, hasSyncedOnce.current ? 250 : 0)
 
     return () => {
@@ -304,24 +741,31 @@ function App() {
 
   const totalHabits = storedState.habits.length
   const totalSlots = totalHabits * monthDays.length
-  const completedCount = storedState.habits.reduce(
-    (total, habit) => total + countHabitDone(habit, monthKeys),
-    0,
+  const dailyCompletionScores = monthKeys.map((dateKey) =>
+    storedState.habits.reduce((total, habit) => total + getHabitCompletionRatio(habit, dateKey), 0),
   )
-  const progressPercent = totalSlots === 0 ? 0 : (completedCount / totalSlots) * 100
-
-  const dailyTotals = monthKeys.map((dateKey) =>
-    storedState.habits.reduce((total, habit) => total + (habit.completions[dateKey] ? 1 : 0), 0),
+  const dailyDoneCounts = monthKeys.map((dateKey) =>
+    storedState.habits.reduce((total, habit) => total + (isHabitComplete(habit, dateKey) ? 1 : 0), 0),
   )
-  const dailyRates = dailyTotals.map((value) => (totalHabits === 0 ? 0 : (value / totalHabits) * 100))
+  const completedCount = dailyDoneCounts.reduce((total, value) => total + value, 0)
+  const progressUnits = dailyCompletionScores.reduce((total, value) => total + value, 0)
+  const progressPercent = totalSlots === 0 ? 0 : (progressUnits / totalSlots) * 100
+  const dailyRates = dailyCompletionScores.map((value) => (totalHabits === 0 ? 0 : (value / totalHabits) * 100))
 
   const habitBreakdown = [...storedState.habits]
     .map((habit) => {
       const done = countHabitDone(habit, monthKeys)
+      const totalAmount = monthKeys.reduce((total, dateKey) => total + getHabitRecordedAmount(habit, dateKey), 0)
+      const averageCompletion =
+        monthDays.length === 0
+          ? 0
+          : monthKeys.reduce((total, dateKey) => total + getHabitCompletionRatio(habit, dateKey), 0) /
+            monthDays.length
       return {
         ...habit,
         done,
-        rate: monthDays.length === 0 ? 0 : (done / monthDays.length) * 100,
+        totalAmount,
+        rate: averageCompletion * 100,
       }
     })
     .sort((left, right) => right.done - left.done)
@@ -337,26 +781,88 @@ function App() {
   const currentMonthIndex = TODAY.getFullYear() * 12 + TODAY.getMonth()
   const elapsedDays =
     monthIndex < currentMonthIndex ? monthDays.length : monthIndex === currentMonthIndex ? TODAY.getDate() : 0
-  const activeDays = dailyTotals.slice(0, elapsedDays).filter((value) => value > 0).length
+  const activeDays = dailyDoneCounts.slice(0, elapsedDays).filter((value) => value > 0).length
   const consistency = elapsedDays === 0 ? 0 : (activeDays / elapsedDays) * 100
-  function toggleCompletion(habitId: string, dateKey: string) {
+  const editingHabit = useMemo(
+    () => storedState.habits.find((habit) => habit.id === editingHabitId) ?? null,
+    [editingHabitId, storedState.habits],
+  )
+
+  function updateHabitEntry(habitId: string, dateKey: string, nextValue: HabitEntry | undefined) {
+    localChangePendingRef.current = true
     setStoredState((current) => ({
       ...current,
-      habits: current.habits.map((habit) =>
-        habit.id === habitId
-          ? {
-              ...habit,
-              completions: {
-                ...habit.completions,
-                [dateKey]: !habit.completions[dateKey],
-              },
-            }
-          : habit,
-      ),
+      habits: current.habits.map((habit) => {
+        if (habit.id !== habitId) {
+          return habit
+        }
+
+        if (nextValue === undefined) {
+          const restEntries = { ...habit.entries }
+          delete restEntries[dateKey]
+          return {
+            ...habit,
+            entries: restEntries,
+          }
+        }
+
+        return {
+          ...habit,
+          entries: {
+            ...habit.entries,
+            [dateKey]: nextValue,
+          },
+        }
+      }),
     }))
   }
 
+  function toggleCompletion(habitId: string, dateKey: string) {
+    const habit = storedState.habits.find((entry) => entry.id === habitId)
+    if (!habit || habit.trackingMode !== 'check') {
+      return
+    }
+
+    const isChecked = Boolean(habit.entries[dateKey])
+    updateHabitEntry(habitId, dateKey, isChecked ? undefined : true)
+  }
+
+  function updateDurationEntry(habitId: string, dateKey: string, rawValue: string) {
+    const trimmedValue = rawValue.trim()
+
+    if (!trimmedValue) {
+      updateHabitEntry(habitId, dateKey, undefined)
+      return
+    }
+
+    const numericValue = Number(trimmedValue)
+    if (!Number.isFinite(numericValue) || numericValue < 0) {
+      return
+    }
+
+    updateHabitEntry(habitId, dateKey, numericValue)
+  }
+
+  function beginHabitEdit(habitId: string) {
+    const habit = storedState.habits.find((entry) => entry.id === habitId)
+    if (!habit) {
+      return
+    }
+
+    setEditingHabitId(habit.id)
+    setForm(getHabitFormFromHabit(habit))
+    window.requestAnimationFrame(() => {
+      controlPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    })
+  }
+
+  function cancelHabitEdit() {
+    setEditingHabitId(null)
+    setForm(getDefaultHabitForm())
+  }
+
   function addHabitFromTemplate(template: HabitTemplate) {
+    localChangePendingRef.current = true
     setStoredState((current) => {
       const exists = current.habits.some(
         (habit) => habit.name.trim().toLowerCase() === template.name.trim().toLowerCase(),
@@ -373,7 +879,7 @@ function App() {
     })
   }
 
-  function handleAddHabit(event: React.FormEvent<HTMLFormElement>) {
+  function handleHabitFormSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
 
     const trimmedName = form.name.trim()
@@ -381,23 +887,80 @@ function App() {
       return
     }
 
-    addHabitFromTemplate({
-      name: trimmedName,
-      icon: form.icon.trim() || '✨',
-      color: form.color,
+    const trackingMode = form.trackingMode
+    const parsedTargetValue =
+      trackingMode === 'time'
+        ? Number(form.targetValue.trim())
+        : Number.NaN
+    const targetValue =
+      trackingMode === 'time' && Number.isFinite(parsedTargetValue) && parsedTargetValue > 0
+        ? parsedTargetValue
+        : null
+    const targetUnit = trackingMode === 'time' ? form.targetUnit.trim() || 'min' : 'check-ins'
+    const duplicateHabit = storedState.habits.some(
+      (habit) => habit.id !== editingHabitId && habit.name.trim().toLowerCase() === trimmedName.toLowerCase(),
+    )
+
+    if (duplicateHabit) {
+      return
+    }
+
+    localChangePendingRef.current = true
+    setStoredState((current) => {
+      if (editingHabitId) {
+        return {
+          ...current,
+          habits: current.habits.map((habit) => {
+            if (habit.id !== editingHabitId) {
+              return habit
+            }
+
+            return {
+              ...habit,
+              name: trimmedName,
+              icon: form.icon.trim() || '✨',
+              color: form.color,
+              trackingMode,
+              targetValue,
+              targetUnit,
+              entries: coerceHabitEntriesToMode(habit.entries, trackingMode),
+            }
+          }),
+        }
+      }
+
+      return {
+        ...current,
+        habits: [
+          ...current.habits,
+          createHabit({
+            name: trimmedName,
+            icon: form.icon.trim() || '✨',
+            color: form.color,
+            trackingMode,
+            targetValue,
+            targetUnit,
+          }),
+        ],
+      }
     })
 
-    setForm({ name: '', icon: '✨', color: form.color })
+    cancelHabitEdit()
   }
 
   function deleteHabit(habitId: string) {
+    localChangePendingRef.current = true
     setStoredState((current) => ({
       ...current,
       habits: current.habits.filter((habit) => habit.id !== habitId),
     }))
+    if (editingHabitId === habitId) {
+      cancelHabitEdit()
+    }
   }
 
   function updateNote(nextValue: string) {
+    localChangePendingRef.current = true
     setStoredState((current) => ({
       ...current,
       notes: {
@@ -456,15 +1019,20 @@ function App() {
       </header>
 
       <main className="workspace-grid">
-        <aside className="control-panel panel">
+        <aside ref={controlPanelRef} className="control-panel panel">
           <div className="section-heading">
             <div>
-              <p className="eyebrow">Add a task</p>
-              <h2>Create a new habit</h2>
+              <p className="eyebrow">{editingHabit ? 'Edit a task' : 'Add a task'}</p>
+              <h2>{editingHabit ? `Editing ${editingHabit.name}` : 'Create a new habit'}</h2>
             </div>
+            {editingHabit ? (
+              <button type="button" className="ghost-button" onClick={cancelHabitEdit}>
+                Cancel edit
+              </button>
+            ) : null}
           </div>
 
-          <form className="habit-form" onSubmit={handleAddHabit}>
+          <form className="habit-form" onSubmit={handleHabitFormSubmit}>
             <label>
               <span>Habit name</span>
               <input
@@ -502,8 +1070,51 @@ function App() {
               </div>
             </div>
 
+            <div className="form-grid">
+              <label>
+                <span>Tracking</span>
+                <select
+                  value={form.trackingMode}
+                  onChange={(event) =>
+                    setForm((current) => ({
+                      ...current,
+                      trackingMode: event.target.value as HabitTrackingMode,
+                    }))
+                  }
+                >
+                  <option value="check">Check-in</option>
+                  <option value="time">Time spent</option>
+                </select>
+              </label>
+
+              {form.trackingMode === 'time' ? (
+                <>
+                  <label>
+                    <span>Target / day</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="5"
+                      value={form.targetValue}
+                      onChange={(event) => setForm((current) => ({ ...current, targetValue: event.target.value }))}
+                      placeholder="60"
+                    />
+                  </label>
+
+                  <label>
+                    <span>Unit</span>
+                    <input
+                      value={form.targetUnit}
+                      onChange={(event) => setForm((current) => ({ ...current, targetUnit: event.target.value }))}
+                      placeholder="min"
+                    />
+                  </label>
+                </>
+              ) : null}
+            </div>
+
             <button type="submit" className="primary-button">
-              Add habit
+              {editingHabit ? 'Save changes' : 'Add habit'}
             </button>
           </form>
 
@@ -611,33 +1222,65 @@ function App() {
                           <strong>
                             {habit.icon} {habit.name}
                           </strong>
-                          <small>{countHabitDone(habit, monthKeys)} check-ins</small>
+                          <small>
+                            {habit.trackingMode === 'time'
+                              ? `${formatAmount(monthKeys.reduce((total, dateKey) => total + getHabitRecordedAmount(habit, dateKey), 0))} ${habit.targetUnit} logged`
+                              : `${countHabitDone(habit, monthKeys)} check-ins`}
+                          </small>
                         </div>
                       </div>
 
-                      <button
-                        type="button"
-                        className="delete-button"
-                        onClick={() => deleteHabit(habit.id)}
-                        aria-label={`Delete ${habit.name}`}
-                      >
-                        ×
-                      </button>
+                      <div className="habit-actions">
+                        <button
+                          type="button"
+                          className="edit-button"
+                          onClick={() => beginHabitEdit(habit.id)}
+                          aria-label={`Edit ${habit.name}`}
+                        >
+                          Edit
+                        </button>
+
+                        <button
+                          type="button"
+                          className="delete-button"
+                          onClick={() => deleteHabit(habit.id)}
+                          aria-label={`Delete ${habit.name}`}
+                        >
+                          ×
+                        </button>
+                      </div>
                     </td>
 
                     {monthKeys.map((dateKey) => {
-                      const checked = Boolean(habit.completions[dateKey])
+                      const entry = getHabitEntry(habit, dateKey)
+                      const checked = Boolean(entry)
                       return (
                         <td key={dateKey}>
-                          <button
-                            type="button"
-                            className={checked ? 'check-button checked' : 'check-button'}
-                            onClick={() => toggleCompletion(habit.id, dateKey)}
-                            aria-pressed={checked}
-                            aria-label={`${checked ? 'Unmark' : 'Mark'} ${habit.name} for ${dateKey}`}
-                          >
-                            {checked ? '✓' : ''}
-                          </button>
+                          {habit.trackingMode === 'time' ? (
+                            <div className="time-cell">
+                              <input
+                                type="number"
+                                min="0"
+                                step="5"
+                                inputMode="numeric"
+                                value={typeof entry === 'number' ? entry : ''}
+                                onChange={(event) => updateDurationEntry(habit.id, dateKey, event.target.value)}
+                                aria-label={`Set time for ${habit.name} on ${dateKey}`}
+                                placeholder="0"
+                              />
+                              <span>{habit.targetUnit}</span>
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              className={checked ? 'check-button checked' : 'check-button'}
+                              onClick={() => toggleCompletion(habit.id, dateKey)}
+                              aria-pressed={checked}
+                              aria-label={`${checked ? 'Unmark' : 'Mark'} ${habit.name} for ${dateKey}`}
+                            >
+                              {checked ? '✓' : ''}
+                            </button>
+                          )}
                         </td>
                       )
                     })}
@@ -654,13 +1297,13 @@ function App() {
                 </tr>
                 <tr>
                   <td>Done</td>
-                  {dailyTotals.map((value, index) => (
+                  {dailyDoneCounts.map((value, index) => (
                     <td key={`${monthKeys[index]}-done`}>{value}</td>
                   ))}
                 </tr>
                 <tr>
                   <td>Not done</td>
-                  {dailyTotals.map((value, index) => (
+                  {dailyDoneCounts.map((value, index) => (
                     <td key={`${monthKeys[index]}-not-done`}>{Math.max(totalHabits - value, 0)}</td>
                   ))}
                 </tr>
@@ -672,8 +1315,8 @@ function App() {
             <div className="mobile-calendar-strip" aria-label={`${monthLabel} day selector`}>
               {monthDays.map((day) => {
                 const dateKey = formatDateKey(day)
-                const isSelected = dateKey === selectedDateKey
-                const completed = storedState.habits.filter((habit) => habit.completions[dateKey]).length
+                const isSelected = dateKey === activeSelectedDateKey
+                const completed = storedState.habits.filter((habit) => isHabitComplete(habit, dateKey)).length
 
                 return (
                   <button
@@ -709,29 +1352,86 @@ function App() {
 
               <div className="mobile-habit-list">
                 {storedState.habits.map((habit) => {
-                  const checked = Boolean(habit.completions[selectedDateKey])
+                  const entry = getHabitEntry(habit, activeSelectedDateKey)
+                  const checked = Boolean(entry)
                   return (
-                    <button
-                      key={`${habit.id}-${selectedDateKey}`}
-                      type="button"
-                      className={checked ? 'mobile-habit-row checked' : 'mobile-habit-row'}
-                      onClick={() => toggleCompletion(habit.id, selectedDateKey)}
-                      aria-pressed={checked}
-                      aria-label={`${checked ? 'Unmark' : 'Mark'} ${habit.name} for ${selectedDateLabel}`}
-                    >
-                      <span className="mobile-habit-label">
-                        <span className="habit-color" style={{ backgroundColor: habit.color }} />
-                        <span>
-                          <strong>
-                            {habit.icon} {habit.name}
-                          </strong>
-                          <small>{checked ? 'Done today' : 'Tap to mark done'}</small>
+                    habit.trackingMode === 'time' ? (
+                      <div key={`${habit.id}-${activeSelectedDateKey}`} className="mobile-habit-row time">
+                        <span className="mobile-habit-label">
+                          <span className="habit-color" style={{ backgroundColor: habit.color }} />
+                          <span>
+                            <strong>
+                              {habit.icon} {habit.name}
+                            </strong>
+                            <small>
+                              {checked
+                                ? `${formatAmount(typeof entry === 'number' ? entry : 0)} ${habit.targetUnit} today`
+                                : 'Enter time spent today'}
+                            </small>
+                          </span>
                         </span>
-                      </span>
-                      <span className={checked ? 'mobile-habit-toggle checked' : 'mobile-habit-toggle'}>
-                        {checked ? '✓' : ''}
-                      </span>
-                    </button>
+
+                        <div className="mobile-habit-actions">
+                          <button
+                            type="button"
+                            className="edit-button mobile-edit-button"
+                            onClick={() => beginHabitEdit(habit.id)}
+                            aria-label={`Edit ${habit.name}`}
+                          >
+                            Edit
+                          </button>
+
+                          <label className="mobile-time-entry">
+                            <input
+                              type="number"
+                              min="0"
+                              step="5"
+                              inputMode="numeric"
+                              value={typeof entry === 'number' ? entry : ''}
+                              onChange={(event) =>
+                                updateDurationEntry(habit.id, activeSelectedDateKey, event.target.value)
+                              }
+                              aria-label={`Set time for ${habit.name} on ${selectedDateLabel}`}
+                              placeholder="0"
+                            />
+                            <span>{habit.targetUnit}</span>
+                          </label>
+                        </div>
+                      </div>
+                    ) : (
+                      <div key={`${habit.id}-${activeSelectedDateKey}`} className={checked ? 'mobile-habit-row checked' : 'mobile-habit-row'}>
+                        <span className="mobile-habit-label">
+                          <span className="habit-color" style={{ backgroundColor: habit.color }} />
+                          <span>
+                            <strong>
+                              {habit.icon} {habit.name}
+                            </strong>
+                            <small>{checked ? 'Done today' : 'Tap the check to mark done'}</small>
+                          </span>
+                        </span>
+
+                        <div className="mobile-habit-actions">
+                          <button
+                            type="button"
+                            className="edit-button mobile-edit-button"
+                            onClick={() => beginHabitEdit(habit.id)}
+                            aria-label={`Edit ${habit.name}`}
+                          >
+                            Edit
+                          </button>
+
+                          <button
+                            type="button"
+                            className={checked ? 'mobile-habit-toggle checked' : 'mobile-habit-toggle'}
+                            onClick={() => toggleCompletion(habit.id, activeSelectedDateKey)}
+                            aria-pressed={checked}
+                            aria-label={`${checked ? 'Unmark' : 'Mark'} ${habit.name} for ${selectedDateLabel}`}
+                          >
+                            {checked ? '✓' : ''}
+                          </button>
+                        </div>
+                      </div>
+                    )
                   )
                 })}
               </div>
@@ -777,7 +1477,9 @@ function App() {
                     {habit.icon} {habit.name}
                   </strong>
                   <span>
-                    {habit.done}/{monthDays.length} days
+                    {habit.trackingMode === 'time'
+                      ? `${formatAmount(habit.totalAmount)} ${habit.targetUnit} total`
+                      : `${habit.done}/${monthDays.length} days`}
                   </span>
                 </div>
                 <div className="mini-bar">
