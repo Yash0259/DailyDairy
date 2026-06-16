@@ -1,5 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import './App.css'
+"use client"
+
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+
+import WeakList, { type WeakListItem } from './components/WeakList'
+import WeakListEditor from './components/WeakListEditor'
 
 type HabitTrackingMode = 'check' | 'time'
 
@@ -10,6 +14,8 @@ type Habit = {
   name: string
   icon: string
   color: string
+  isMajorTask: boolean
+  subtasks: string[]
   trackingMode: HabitTrackingMode
   targetValue: number | null
   targetUnit: string
@@ -17,15 +23,23 @@ type Habit = {
   createdAt: string
 }
 
+type ConqueredHabit = Habit & {
+  conqueredAt: string
+}
+
 type PersistedState = {
   habits: Habit[]
   notes: Record<string, string>
+  weakList: WeakListItem[]
+  conqueredList: ConqueredHabit[]
 }
 
 type HabitTemplate = {
   name: string
   icon: string
   color: string
+  isMajorTask?: boolean
+  subtasks?: string[]
   trackingMode?: HabitTrackingMode
   targetValue?: number | null
   targetUnit?: string
@@ -35,6 +49,8 @@ type HabitFormState = {
   name: string
   icon: string
   color: string
+  isMajorTask: boolean
+  subtasks: string[]
   trackingMode: HabitTrackingMode
   targetValue: string
   targetUnit: string
@@ -45,7 +61,6 @@ type ThemeMode = 'dark' | 'light'
 
 const STORAGE_KEY = 'habit-tracker-local-cache'
 const THEME_KEY = 'habit-tracker-theme'
-const SYNC_POLL_INTERVAL_MS = 5000
 const COLOR_SWATCHES = ['#98d66c', '#f8b94d', '#ff8a72', '#70d6c3', '#87a7ff', '#e58dff']
 const TODAY = new Date()
 
@@ -65,12 +80,43 @@ function formatDateKey(date: Date) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
 }
 
+function normalizeSubtasks(input: unknown) {
+  if (!Array.isArray(input)) {
+    return []
+  }
+
+  const seen = new Set<string>()
+  const subtasks: string[] = []
+
+  for (const item of input) {
+    if (typeof item !== 'string') {
+      continue
+    }
+
+    const subtask = item.trim()
+    const key = subtask.toLowerCase()
+
+    if (!subtask || seen.has(key)) {
+      continue
+    }
+
+    seen.add(key)
+    subtasks.push(subtask)
+  }
+
+  return subtasks
+}
+
 function createHabit(template: HabitTemplate): Habit {
+  const subtasks = normalizeSubtasks(template.subtasks)
+
   return {
     id: crypto.randomUUID(),
     name: template.name,
     icon: template.icon,
     color: template.color,
+    isMajorTask: Boolean(template.isMajorTask || subtasks.length > 0),
+    subtasks,
     trackingMode: template.trackingMode ?? 'check',
     targetValue: template.targetValue ?? null,
     targetUnit: template.targetUnit ?? (template.trackingMode === 'time' ? 'min' : 'check-ins'),
@@ -84,9 +130,60 @@ function getDefaultHabitForm(): HabitFormState {
     name: '',
     icon: '✨',
     color: COLOR_SWATCHES[0],
+    isMajorTask: false,
+    subtasks: [],
     trackingMode: 'check',
     targetValue: '60',
     targetUnit: 'min',
+  }
+}
+
+function createWeakListItem(input: Omit<WeakListItem, 'id' | 'createdAt'>): WeakListItem {
+  return {
+    id: crypto.randomUUID(),
+    weakness: input.weakness,
+    futureHabit: input.futureHabit,
+    note: input.note,
+    createdAt: new Date().toISOString(),
+  }
+}
+
+function normalizeWeakListItem(input: unknown): WeakListItem | null {
+  if (!input || typeof input !== 'object') {
+    return null
+  }
+
+  const candidate = input as Record<string, unknown>
+  const id = typeof candidate.id === 'string' && candidate.id.trim() ? candidate.id : null
+  const weakness = typeof candidate.weakness === 'string' && candidate.weakness.trim() ? candidate.weakness.trim() : null
+  const futureHabit =
+    typeof candidate.futureHabit === 'string' && candidate.futureHabit.trim() ? candidate.futureHabit.trim() : null
+  const note = typeof candidate.note === 'string' ? candidate.note.trim() : ''
+
+  if (!id || !weakness || !futureHabit) {
+    return null
+  }
+
+  return {
+    id,
+    weakness,
+    futureHabit,
+    note,
+    createdAt: typeof candidate.createdAt === 'string' ? candidate.createdAt : new Date().toISOString(),
+  }
+}
+
+function normalizeConqueredHabit(input: unknown): ConqueredHabit | null {
+  const habit = normalizeHabit(input)
+  if (!habit || !input || typeof input !== 'object') {
+    return null
+  }
+
+  const candidate = input as Record<string, unknown>
+
+  return {
+    ...habit,
+    conqueredAt: typeof candidate.conqueredAt === 'string' ? candidate.conqueredAt : new Date().toISOString(),
   }
 }
 
@@ -95,6 +192,8 @@ function getHabitFormFromHabit(habit: Habit): HabitFormState {
     name: habit.name,
     icon: habit.icon,
     color: habit.color,
+    isMajorTask: habit.isMajorTask,
+    subtasks: habit.isMajorTask && habit.subtasks.length === 0 ? [''] : [...habit.subtasks],
     trackingMode: habit.trackingMode,
     targetValue: String(habit.targetValue ?? 60),
     targetUnit: habit.targetUnit || (habit.trackingMode === 'time' ? 'min' : 'check-ins'),
@@ -162,6 +261,8 @@ function normalizeHabit(input: unknown): Habit | null {
   const name = typeof candidate.name === 'string' && candidate.name.trim() ? candidate.name.trim() : null
   const icon = typeof candidate.icon === 'string' && candidate.icon.trim() ? candidate.icon.trim() : '✨'
   const color = typeof candidate.color === 'string' && candidate.color.trim() ? candidate.color.trim() : COLOR_SWATCHES[0]
+  const subtasks = normalizeSubtasks(candidate.subtasks)
+  const isMajorTask = candidate.isMajorTask === true || candidate.taskType === 'major' || subtasks.length > 0
   const trackingMode = inferTrackingMode(candidate)
   const rawTargetValue = candidate.targetValue ?? candidate.goalValue ?? candidate.targetMinutes
   const targetValue =
@@ -195,6 +296,8 @@ function normalizeHabit(input: unknown): Habit | null {
     name,
     icon,
     color,
+    isMajorTask,
+    subtasks,
     trackingMode,
     targetValue,
     targetUnit,
@@ -214,13 +317,19 @@ function normalizeState(input: unknown): PersistedState {
   }
 
   const habits = candidate.habits.map(normalizeHabit).filter((habit): habit is Habit => habit !== null)
-  if (habits.length === 0) {
-    return getDefaultState()
-  }
+
+  const weakList = Array.isArray(candidate.weakList)
+    ? candidate.weakList.map(normalizeWeakListItem).filter((item): item is WeakListItem => item !== null)
+    : []
+  const conqueredList = Array.isArray(candidate.conqueredList)
+    ? candidate.conqueredList.map(normalizeConqueredHabit).filter((item): item is ConqueredHabit => item !== null)
+    : []
 
   return {
     habits,
     notes: candidate.notes as Record<string, string>,
+    weakList,
+    conqueredList,
   }
 }
 
@@ -230,6 +339,8 @@ function getDefaultState(): PersistedState {
     notes: {
       [formatDateKey(TODAY)]: 'Focus on consistency before intensity.',
     },
+    weakList: [],
+    conqueredList: [],
   }
 }
 
@@ -300,15 +411,46 @@ function countHabitDone(habit: Habit, dateKeys: string[]) {
 function cloneHabit(habit: Habit): Habit {
   return {
     ...habit,
+    subtasks: [...habit.subtasks],
     entries: { ...habit.entries },
   }
 }
 
-function cloneState(state: PersistedState): PersistedState {
+function createConqueredHabit(habit: Habit): ConqueredHabit {
   return {
-    habits: state.habits.map(cloneHabit),
-    notes: { ...state.notes },
+    ...cloneHabit(habit),
+    conqueredAt: new Date().toISOString(),
   }
+}
+
+function getAvailableHabitName(name: string, habits: Habit[]) {
+  const usedNames = new Set(habits.map((habit) => habit.name.trim().toLowerCase()))
+
+  if (!usedNames.has(name.trim().toLowerCase())) {
+    return name
+  }
+
+  let index = 2
+  let candidate = `${name} (${index})`
+
+  while (usedNames.has(candidate.trim().toLowerCase())) {
+    index += 1
+    candidate = `${name} (${index})`
+  }
+
+  return candidate
+}
+
+function restoreConqueredHabit(conqueredHabit: ConqueredHabit, activeHabits: Habit[]): Habit {
+  const restoredHabit = cloneHabit(conqueredHabit)
+
+  if (activeHabits.some((habit) => habit.id === restoredHabit.id)) {
+    restoredHabit.id = crypto.randomUUID()
+  }
+
+  restoredHabit.name = getAvailableHabitName(restoredHabit.name, activeHabits)
+
+  return restoredHabit
 }
 
 function stableSerialize(value: unknown): string {
@@ -343,92 +485,6 @@ function stableSerialize(value: unknown): string {
 
 function statesEqual(left: PersistedState, right: PersistedState) {
   return stableSerialize(left) === stableSerialize(right)
-}
-
-function mergeHabit(baseHabit: Habit, localHabit: Habit, remoteHabit: Habit) {
-  const mergedHabit = cloneHabit(remoteHabit)
-
-  if (localHabit.name !== baseHabit.name) {
-    mergedHabit.name = localHabit.name
-  }
-
-  if (localHabit.icon !== baseHabit.icon) {
-    mergedHabit.icon = localHabit.icon
-  }
-
-  if (localHabit.color !== baseHabit.color) {
-    mergedHabit.color = localHabit.color
-  }
-
-  if (localHabit.createdAt !== baseHabit.createdAt) {
-    mergedHabit.createdAt = localHabit.createdAt
-  }
-
-  if (localHabit.trackingMode !== baseHabit.trackingMode) {
-    mergedHabit.trackingMode = localHabit.trackingMode
-  }
-
-  if (localHabit.targetValue !== baseHabit.targetValue) {
-    mergedHabit.targetValue = localHabit.targetValue
-  }
-
-  if (localHabit.targetUnit !== baseHabit.targetUnit) {
-    mergedHabit.targetUnit = localHabit.targetUnit
-  }
-
-  const entryKeys = new Set([
-    ...Object.keys(baseHabit.entries),
-    ...Object.keys(localHabit.entries),
-  ])
-
-  for (const dateKey of entryKeys) {
-    if (localHabit.entries[dateKey] !== baseHabit.entries[dateKey]) {
-      if (localHabit.entries[dateKey] === undefined) {
-        delete mergedHabit.entries[dateKey]
-      } else {
-        mergedHabit.entries[dateKey] = localHabit.entries[dateKey]
-      }
-    }
-  }
-
-  return mergedHabit
-}
-
-function mergeStates(baseState: PersistedState, localState: PersistedState, remoteState: PersistedState) {
-  const mergedState = cloneState(remoteState)
-  const baseHabits = new Map(baseState.habits.map((habit) => [habit.id, habit]))
-  const localHabits = new Map(localState.habits.map((habit) => [habit.id, habit]))
-  const mergedHabitIndex = new Map(mergedState.habits.map((habit, index) => [habit.id, index]))
-
-  for (const [noteKey, noteValue] of Object.entries(localState.notes)) {
-    if (noteValue !== baseState.notes[noteKey]) {
-      mergedState.notes[noteKey] = noteValue
-    }
-  }
-
-  for (const localHabit of localState.habits) {
-    const baseHabit = baseHabits.get(localHabit.id)
-    const mergedIndex = mergedHabitIndex.get(localHabit.id)
-
-    if (!baseHabit) {
-      if (mergedIndex === undefined) {
-        mergedState.habits.push(cloneHabit(localHabit))
-      }
-      continue
-    }
-
-    if (mergedIndex === undefined) {
-      mergedState.habits.push(cloneHabit(localHabit))
-      continue
-    }
-
-    const remoteHabit = mergedState.habits[mergedIndex]
-    mergedState.habits[mergedIndex] = mergeHabit(baseHabit, localHabit, remoteHabit)
-  }
-
-  mergedState.habits = mergedState.habits.filter((habit) => localHabits.has(habit.id) || !baseHabits.has(habit.id))
-
-  return mergedState
 }
 
 function getHabitEntry(habit: Habit, dateKey: string) {
@@ -470,6 +526,50 @@ function formatAmount(value: number) {
   return Number.isInteger(value) ? String(value) : value.toFixed(1)
 }
 
+function HabitSubtaskPreview({ habit }: { habit: Habit }) {
+  const [isOpen, setIsOpen] = useState(false)
+
+  if (!habit.isMajorTask && habit.subtasks.length === 0) {
+    return null
+  }
+
+  return (
+    <div className="task-plan">
+      <button
+        type="button"
+        className="task-plan-trigger"
+        onClick={() => setIsOpen((current) => !current)}
+        aria-expanded={isOpen}
+      >
+        <span>
+          <span className="task-plan-kicker">Major task</span>
+          <strong>{habit.subtasks.length > 0 ? `${habit.subtasks.length} step plan` : 'No steps yet'}</strong>
+        </span>
+        <span className="task-plan-icon" aria-hidden="true">
+          {isOpen ? '-' : '+'}
+        </span>
+      </button>
+
+      {isOpen ? (
+        <div className="task-plan-panel">
+          {habit.subtasks.length > 0 ? (
+            <ol>
+              {habit.subtasks.map((subtask, index) => (
+                <li key={subtask}>
+                  <span>{String(index + 1).padStart(2, '0')}</span>
+                  {subtask}
+                </li>
+              ))}
+            </ol>
+          ) : (
+            <p>Add steps from Edit to make this major task easier to execute.</p>
+          )}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 function ProgressChart({ values }: { values: number[] }) {
   const safeValues = values.length > 1 ? values : [0, values[0] ?? 0]
   const points = safeValues
@@ -509,25 +609,109 @@ function ProgressChart({ values }: { values: number[] }) {
   )
 }
 
+function formatShortDate(value: string) {
+  const date = new Date(value)
+
+  if (Number.isNaN(date.getTime())) {
+    return 'Saved'
+  }
+
+  return new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric' }).format(date)
+}
+
+function getConqueredSummary(habit: ConqueredHabit) {
+  const entryKeys = Object.keys(habit.entries)
+  const activeDays = entryKeys.filter((dateKey) => getHabitRecordedAmount(habit, dateKey) > 0).length
+
+  if (habit.trackingMode === 'time') {
+    const totalAmount = entryKeys.reduce((total, dateKey) => total + getHabitRecordedAmount(habit, dateKey), 0)
+
+    return {
+      primary: `${formatAmount(totalAmount)} ${habit.targetUnit} logged`,
+      secondary: `${activeDays} active days`,
+    }
+  }
+
+  const checkIns = entryKeys.filter((dateKey) => isHabitComplete(habit, dateKey)).length
+
+  return {
+    primary: `${checkIns} check-ins`,
+    secondary: `${activeDays} active days`,
+  }
+}
+
+function ConqueredList({
+  items,
+  onRestoreItem,
+}: {
+  items: ConqueredHabit[]
+  onRestoreItem: (itemId: string) => void
+}) {
+  return (
+    <section className="conquered-list-panel">
+      <div className="section-heading">
+        <div>
+          <p className="eyebrow">Showcase</p>
+          <h3>Conquered</h3>
+          <p className="muted">Habits you have already carried for a long time.</p>
+        </div>
+        <p className="muted">{items.length} saved</p>
+      </div>
+
+      <div className="conquered-list-items">
+        {items.map((item) => {
+          const summary = getConqueredSummary(item)
+
+          return (
+            <article key={item.id} className="conquered-list-card">
+              <div className="conquered-card-top">
+                <span className="habit-color" style={{ backgroundColor: item.color }} />
+                <div>
+                  <h4>
+                    {item.icon} {item.name}
+                  </h4>
+                  <p>{summary.primary}</p>
+                </div>
+              </div>
+
+              <div className="conquered-card-meta">
+                <span>{summary.secondary}</span>
+                <span>Conquered {formatShortDate(item.conqueredAt)}</span>
+              </div>
+
+              <button type="button" className="ghost-button conquered-restore" onClick={() => onRestoreItem(item.id)}>
+                Restore to daily habits
+              </button>
+            </article>
+          )
+        })}
+
+        {items.length === 0 ? (
+          <div className="conquered-list-empty">
+            <p>No conquered habits yet.</p>
+            <span>Move a long-running daily habit here when it no longer needs daily tracking.</span>
+          </div>
+        ) : null}
+      </div>
+    </section>
+  )
+}
+
 function App() {
-  const initialCachedState = useMemo(() => loadCachedState(), [])
-  const [storedState, setStoredState] = useState<PersistedState>(initialCachedState)
+  const [storedState, setStoredState] = useState<PersistedState>(() => getDefaultState())
   const [monthAnchor, setMonthAnchor] = useState(() => new Date(TODAY.getFullYear(), TODAY.getMonth(), 1))
   const [selectedDateKey, setSelectedDateKey] = useState(() => formatDateKey(TODAY))
   const [form, setForm] = useState<HabitFormState>(() => getDefaultHabitForm())
   const [editingHabitId, setEditingHabitId] = useState<string | null>(null)
   const [backendStatus, setBackendStatus] = useState<BackendStatus>('loading')
-  const [themeMode, setThemeMode] = useState<ThemeMode>(() => loadThemePreference())
+  const [themeMode, setThemeMode] = useState<ThemeMode>('dark')
+  const [themeLoaded, setThemeLoaded] = useState(false)
   const [hydrated, setHydrated] = useState(false)
-  const storedStateRef = useRef(initialCachedState)
-  const lastSyncedStateRef = useRef(initialCachedState)
-  const saveTimer = useRef<number | null>(null)
-  const hasSyncedOnce = useRef(false)
-  const backendStatusRef = useRef<BackendStatus>('loading')
+  const [isSetupDrawerOpen, setSetupDrawerOpen] = useState(false)
+  const storedStateRef = useRef(storedState)
+  const lastSyncedStateRef = useRef(storedState)
   const saveInFlightRef = useRef(false)
-  const saveQueuedRef = useRef(false)
-  const localChangePendingRef = useRef(false)
-  const controlPanelRef = useRef<HTMLElement | null>(null)
+  const queuedStateRef = useRef<PersistedState | null>(null)
 
   const todayKey = formatDateKey(TODAY)
   const monthDays = useMemo(() => buildMonthDays(monthAnchor), [monthAnchor])
@@ -556,27 +740,122 @@ function App() {
   )
 
   useEffect(() => {
+    const storedTheme = loadThemePreference()
+
+    queueMicrotask(() => {
+      setThemeMode(storedTheme)
+      setThemeLoaded(true)
+    })
+  }, [])
+
+  useEffect(() => {
+    if (!themeLoaded) {
+      return
+    }
+
     document.body.dataset.theme = themeMode
     document.documentElement.style.colorScheme = themeMode
     window.localStorage.setItem(THEME_KEY, themeMode)
-  }, [themeMode])
+  }, [themeLoaded, themeMode])
+
+  useEffect(() => {
+    if (!isSetupDrawerOpen) {
+      return
+    }
+
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setSetupDrawerOpen(false)
+        setEditingHabitId(null)
+        setForm(getDefaultHabitForm())
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+
+    return () => {
+      document.body.style.overflow = previousOverflow
+      window.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [isSetupDrawerOpen])
 
   useEffect(() => {
     storedStateRef.current = storedState
   }, [storedState])
 
+  async function flushQueuedSave() {
+    if (saveInFlightRef.current || queuedStateRef.current === null) {
+      return
+    }
+
+    const nextState = queuedStateRef.current
+    queuedStateRef.current = null
+    saveInFlightRef.current = true
+    setBackendStatus('saving')
+
+    try {
+      await saveStateToServer(nextState)
+      lastSyncedStateRef.current = nextState
+      setBackendStatus('connected')
+    } catch {
+      queuedStateRef.current = nextState
+      setBackendStatus('offline')
+    } finally {
+      saveInFlightRef.current = false
+
+      if (queuedStateRef.current !== null && !statesEqual(queuedStateRef.current, lastSyncedStateRef.current)) {
+        void flushQueuedSave()
+      }
+    }
+  }
+
+  function commitState(
+    update: PersistedState | ((current: PersistedState) => PersistedState),
+    options?: { sync?: boolean },
+  ) {
+    const currentState = storedStateRef.current
+    const nextState = typeof update === 'function' ? update(currentState) : update
+
+    if (statesEqual(currentState, nextState)) {
+      return
+    }
+
+    storedStateRef.current = nextState
+    setStoredState(nextState)
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(nextState))
+
+    if (options?.sync === false || !hydrated) {
+      return
+    }
+
+    queuedStateRef.current = nextState
+    void flushQueuedSave()
+  }
+
   useEffect(() => {
     let active = true
 
     function applyRemoteState(remoteState: PersistedState) {
+      storedStateRef.current = remoteState
       lastSyncedStateRef.current = remoteState
-      localChangePendingRef.current = false
       window.localStorage.setItem(STORAGE_KEY, JSON.stringify(remoteState))
       setStoredState((current) => (statesEqual(current, remoteState) ? current : remoteState))
     }
 
     async function bootstrap() {
       try {
+        const cachedState = loadCachedState()
+        if (!active) {
+          return
+        }
+
+        setStoredState(cachedState)
+        storedStateRef.current = cachedState
+        lastSyncedStateRef.current = cachedState
+
         const remoteState = await fetchStateFromServer()
         if (!active) {
           return
@@ -590,7 +869,10 @@ function App() {
         }
 
         setBackendStatus('offline')
-        setStoredState(loadCachedState())
+        const cachedState = loadCachedState()
+        setStoredState(cachedState)
+        storedStateRef.current = cachedState
+        lastSyncedStateRef.current = cachedState
       } finally {
         if (active) {
           setHydrated(true)
@@ -604,140 +886,6 @@ function App() {
       active = false
     }
   }, [])
-
-  useEffect(() => {
-    if (!hydrated) {
-      return
-    }
-
-    let active = true
-
-    async function refreshFromServer() {
-      if (saveInFlightRef.current || localChangePendingRef.current) {
-        return
-      }
-
-      try {
-        const remoteState = await fetchStateFromServer()
-        if (!active) {
-          return
-        }
-
-        if (!statesEqual(remoteState, lastSyncedStateRef.current)) {
-          lastSyncedStateRef.current = remoteState
-          window.localStorage.setItem(STORAGE_KEY, JSON.stringify(remoteState))
-          setStoredState((current) => (statesEqual(current, remoteState) ? current : remoteState))
-        }
-
-        setBackendStatus('connected')
-      } catch {
-        if (active) {
-          setBackendStatus('offline')
-        }
-      }
-    }
-
-    const intervalId = window.setInterval(() => {
-      void refreshFromServer()
-    }, SYNC_POLL_INTERVAL_MS)
-
-    const handleVisibility = () => {
-      if (document.visibilityState === 'visible') {
-        void refreshFromServer()
-      }
-    }
-
-    const handleFocus = () => {
-      void refreshFromServer()
-    }
-
-    document.addEventListener('visibilitychange', handleVisibility)
-    window.addEventListener('focus', handleFocus)
-    void refreshFromServer()
-
-    return () => {
-      active = false
-      window.clearInterval(intervalId)
-      document.removeEventListener('visibilitychange', handleVisibility)
-      window.removeEventListener('focus', handleFocus)
-    }
-  }, [hydrated])
-
-  useEffect(() => {
-    backendStatusRef.current = backendStatus
-  }, [backendStatus])
-
-  useEffect(() => {
-    if (!hydrated) {
-      return
-    }
-
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(storedState))
-
-    if (statesEqual(storedState, lastSyncedStateRef.current)) {
-      return
-    }
-
-    localChangePendingRef.current = true
-
-    if (saveTimer.current !== null) {
-      window.clearTimeout(saveTimer.current)
-    }
-
-    saveTimer.current = window.setTimeout(() => {
-      if (saveInFlightRef.current) {
-        saveQueuedRef.current = true
-        return
-      }
-
-      const flushSave = async () => {
-        if (backendStatusRef.current === 'offline') {
-          setBackendStatus('saving')
-        } else {
-          setBackendStatus('saving')
-        }
-
-        saveInFlightRef.current = true
-
-        try {
-          const baseState = lastSyncedStateRef.current
-          const latestRemoteState = await fetchStateFromServer()
-          const mergedState = mergeStates(baseState, storedStateRef.current, latestRemoteState)
-
-          await saveStateToServer(mergedState)
-
-          hasSyncedOnce.current = true
-          lastSyncedStateRef.current = mergedState
-          localChangePendingRef.current = false
-          window.localStorage.setItem(STORAGE_KEY, JSON.stringify(mergedState))
-          setStoredState((current) => (statesEqual(current, mergedState) ? current : mergedState))
-          setBackendStatus('connected')
-        } catch {
-          setBackendStatus('offline')
-        } finally {
-          saveInFlightRef.current = false
-
-          if (saveQueuedRef.current) {
-            saveQueuedRef.current = false
-
-            if (!statesEqual(storedStateRef.current, lastSyncedStateRef.current)) {
-              saveTimer.current = window.setTimeout(() => {
-                void flushSave()
-              }, 0)
-            }
-          }
-        }
-      }
-
-      void flushSave()
-    }, hasSyncedOnce.current ? 250 : 0)
-
-    return () => {
-      if (saveTimer.current !== null) {
-        window.clearTimeout(saveTimer.current)
-      }
-    }
-  }, [hydrated, storedState])
 
   const totalHabits = storedState.habits.length
   const totalSlots = totalHabits * monthDays.length
@@ -789,8 +937,7 @@ function App() {
   )
 
   function updateHabitEntry(habitId: string, dateKey: string, nextValue: HabitEntry | undefined) {
-    localChangePendingRef.current = true
-    setStoredState((current) => ({
+    commitState((current) => ({
       ...current,
       habits: current.habits.map((habit) => {
         if (habit.id !== habitId) {
@@ -851,9 +998,7 @@ function App() {
 
     setEditingHabitId(habit.id)
     setForm(getHabitFormFromHabit(habit))
-    window.requestAnimationFrame(() => {
-      controlPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-    })
+    setSetupDrawerOpen(true)
   }
 
   function cancelHabitEdit() {
@@ -861,9 +1006,52 @@ function App() {
     setForm(getDefaultHabitForm())
   }
 
+  function openCreateDrawer() {
+    cancelHabitEdit()
+    setSetupDrawerOpen(true)
+  }
+
+  function closeSetupDrawer() {
+    setSetupDrawerOpen(false)
+    cancelHabitEdit()
+  }
+
+  function setMajorTaskMode(isMajorTask: boolean) {
+    setForm((current) => ({
+      ...current,
+      isMajorTask,
+      subtasks: isMajorTask && current.subtasks.length === 0 ? [''] : current.subtasks,
+    }))
+  }
+
+  function updateSubtask(index: number, value: string) {
+    setForm((current) => ({
+      ...current,
+      subtasks: current.subtasks.map((subtask, subtaskIndex) => (subtaskIndex === index ? value : subtask)),
+    }))
+  }
+
+  function addSubtaskField() {
+    setForm((current) => ({
+      ...current,
+      isMajorTask: true,
+      subtasks: [...current.subtasks, ''],
+    }))
+  }
+
+  function removeSubtaskField(index: number) {
+    setForm((current) => {
+      const subtasks = current.subtasks.filter((_, subtaskIndex) => subtaskIndex !== index)
+
+      return {
+        ...current,
+        subtasks: subtasks.length > 0 ? subtasks : [''],
+      }
+    })
+  }
+
   function addHabitFromTemplate(template: HabitTemplate) {
-    localChangePendingRef.current = true
-    setStoredState((current) => {
+    commitState((current) => {
       const exists = current.habits.some(
         (habit) => habit.name.trim().toLowerCase() === template.name.trim().toLowerCase(),
       )
@@ -879,7 +1067,7 @@ function App() {
     })
   }
 
-  function handleHabitFormSubmit(event: React.FormEvent<HTMLFormElement>) {
+  function handleHabitFormSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
 
     const trimmedName = form.name.trim()
@@ -897,6 +1085,8 @@ function App() {
         ? parsedTargetValue
         : null
     const targetUnit = trackingMode === 'time' ? form.targetUnit.trim() || 'min' : 'check-ins'
+    const subtasks = form.isMajorTask ? normalizeSubtasks(form.subtasks) : []
+    const isMajorTask = form.isMajorTask || subtasks.length > 0
     const duplicateHabit = storedState.habits.some(
       (habit) => habit.id !== editingHabitId && habit.name.trim().toLowerCase() === trimmedName.toLowerCase(),
     )
@@ -905,8 +1095,7 @@ function App() {
       return
     }
 
-    localChangePendingRef.current = true
-    setStoredState((current) => {
+    commitState((current) => {
       if (editingHabitId) {
         return {
           ...current,
@@ -920,6 +1109,8 @@ function App() {
               name: trimmedName,
               icon: form.icon.trim() || '✨',
               color: form.color,
+              isMajorTask,
+              subtasks,
               trackingMode,
               targetValue,
               targetUnit,
@@ -937,6 +1128,8 @@ function App() {
             name: trimmedName,
             icon: form.icon.trim() || '✨',
             color: form.color,
+            isMajorTask,
+            subtasks,
             trackingMode,
             targetValue,
             targetUnit,
@@ -944,29 +1137,90 @@ function App() {
         ],
       }
     })
-
     cancelHabitEdit()
+    setSetupDrawerOpen(false)
   }
 
   function deleteHabit(habitId: string) {
-    localChangePendingRef.current = true
-    setStoredState((current) => ({
+    commitState((current) => ({
       ...current,
       habits: current.habits.filter((habit) => habit.id !== habitId),
     }))
     if (editingHabitId === habitId) {
       cancelHabitEdit()
+      setSetupDrawerOpen(false)
     }
   }
 
+  function conquerHabit(habitId: string) {
+    commitState((current) => {
+      const habit = current.habits.find((entry) => entry.id === habitId)
+
+      if (!habit) {
+        return current
+      }
+
+      return {
+        ...current,
+        habits: current.habits.filter((entry) => entry.id !== habitId),
+        conqueredList: current.conqueredList.some((entry) => entry.id === habitId)
+          ? current.conqueredList
+          : [...current.conqueredList, createConqueredHabit(habit)],
+      }
+    })
+
+    if (editingHabitId === habitId) {
+      cancelHabitEdit()
+    }
+  }
+
+  function restoreConqueredItem(itemId: string) {
+    commitState((current) => {
+      const conqueredHabit = current.conqueredList.find((habit) => habit.id === itemId)
+
+      if (!conqueredHabit) {
+        return current
+      }
+
+      return {
+        ...current,
+        habits: [...current.habits, restoreConqueredHabit(conqueredHabit, current.habits)],
+        conqueredList: current.conqueredList.filter((habit) => habit.id !== itemId),
+      }
+    })
+  }
+
   function updateNote(nextValue: string) {
-    localChangePendingRef.current = true
-    setStoredState((current) => ({
+    commitState((current) => ({
       ...current,
       notes: {
         ...current.notes,
         [todayKey]: nextValue,
       },
+    }))
+  }
+
+  function addWeakListItem(item: Omit<WeakListItem, 'id' | 'createdAt'>) {
+    commitState((current) => {
+      const weakness = item.weakness.trim()
+      const futureHabit = item.futureHabit.trim()
+      const note = item.note.trim()
+
+      if (!weakness || !futureHabit) {
+        return current
+      }
+
+      return {
+        ...current,
+        weakList: [...current.weakList, createWeakListItem({ weakness, futureHabit, note })],
+      }
+    })
+  }
+
+  function deleteWeakListItem(itemId: string) {
+    commitState((current) => ({
+      ...current,
+      weakList: current.weakList.filter((item) => item.id !== itemId),
     }))
   }
 
@@ -987,9 +1241,14 @@ function App() {
             </p>
           </div>
 
-          <button type="button" className="theme-toggle" onClick={toggleTheme}>
-            {themeMode === 'dark' ? 'Light mode' : 'Dark mode'}
-          </button>
+          <div className="hero-actions">
+            <button type="button" className="drawer-toggle" onClick={openCreateDrawer}>
+              Add task / Weak list
+            </button>
+            <button type="button" className="theme-toggle" onClick={toggleTheme}>
+              {themeMode === 'dark' ? 'Light mode' : 'Dark mode'}
+            </button>
+          </div>
         </div>
 
         <div className="hero-badges">
@@ -1004,6 +1263,10 @@ function App() {
             <strong>{totalHabits}</strong>
           </div>
           <div className="hero-stat">
+            <span>Conquered</span>
+            <strong>{storedState.conqueredList.length}</strong>
+          </div>
+          <div className="hero-stat">
             <span>Completed</span>
             <strong>{completedCount}</strong>
           </div>
@@ -1011,305 +1274,205 @@ function App() {
             <span>Progress</span>
             <strong>{progressPercent.toFixed(1)}%</strong>
           </div>
-          <div className="hero-stat">
-            <span>DB</span>
-            <strong>{backendStatus === 'connected' ? 'Live' : backendStatus === 'saving' ? 'Syncing' : 'Offline'}</strong>
-          </div>
         </div>
       </header>
 
       <main className="workspace-grid">
-        <aside ref={controlPanelRef} className="control-panel panel">
-          <div className="section-heading">
-            <div>
-              <p className="eyebrow">{editingHabit ? 'Edit a task' : 'Add a task'}</p>
-              <h2>{editingHabit ? `Editing ${editingHabit.name}` : 'Create a new habit'}</h2>
+        <div className="tracker-column">
+          <aside className="control-panel panel">
+            <div className="template-box">
+              <div className="section-heading">
+                <div>
+                  <p className="eyebrow">Quick start</p>
+                  <h3>One-tap templates</h3>
+                </div>
+              </div>
+
+              <div className="template-list">
+                {HABIT_TEMPLATES.map((template) => (
+                  <button
+                    key={template.name}
+                    type="button"
+                    className="template-chip"
+                    onClick={() => addHabitFromTemplate(template)}
+                  >
+                    <span>{template.icon}</span>
+                    {template.name}
+                  </button>
+                ))}
+              </div>
             </div>
-            {editingHabit ? (
-              <button type="button" className="ghost-button" onClick={cancelHabitEdit}>
-                Cancel edit
-              </button>
-            ) : null}
-          </div>
 
-          <form className="habit-form" onSubmit={handleHabitFormSubmit}>
-            <label>
-              <span>Habit name</span>
-              <input
-                value={form.name}
-                onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))}
-                placeholder="Example: No sugar"
+            <div className="note-box">
+              <div className="section-heading">
+                <div>
+                  <p className="eyebrow">Today focus</p>
+                  <h3>Short daily note</h3>
+                </div>
+                <p className="muted">{todayKey}</p>
+              </div>
+
+              <textarea
+                value={storedState.notes[todayKey] ?? ''}
+                onChange={(event) => updateNote(event.target.value)}
+                placeholder="Write one line about today's priority."
               />
-            </label>
+            </div>
+          </aside>
 
-            <div className="form-row">
-              <label>
-                <span>Icon</span>
-                <input
-                  value={form.icon}
-                  onChange={(event) => setForm((current) => ({ ...current, icon: event.target.value }))}
-                  maxLength={2}
-                  placeholder="✨"
-                />
-              </label>
-
+          <section className="tracker-panel panel">
+            <div className="tracker-toolbar">
               <div>
-                <span className="label-title">Color</span>
-                <div className="swatches" role="list" aria-label="Habit colors">
-                  {COLOR_SWATCHES.map((color) => (
-                    <button
-                      key={color}
-                      type="button"
-                      className={form.color === color ? 'swatch active' : 'swatch'}
-                      style={{ backgroundColor: color }}
-                      onClick={() => setForm((current) => ({ ...current, color }))}
-                      aria-label={`Select ${color}`}
-                    />
-                  ))}
+                <p className="eyebrow">Month view</p>
+                <h2>{monthLabel}</h2>
+              </div>
+
+              <div className="toolbar-actions">
+                <button
+                  type="button"
+                  className="ghost-button"
+                  onClick={() => setMonthAnchor(new Date(TODAY.getFullYear(), TODAY.getMonth(), 1))}
+                >
+                  Current month
+                </button>
+                <div className="month-switcher">
+                  <button
+                    type="button"
+                    className="ghost-button square"
+                    onClick={() =>
+                      setMonthAnchor((current) => new Date(current.getFullYear(), current.getMonth() - 1, 1))
+                    }
+                    aria-label="Previous month"
+                  >
+                    ←
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost-button square"
+                    onClick={() =>
+                      setMonthAnchor((current) => new Date(current.getFullYear(), current.getMonth() + 1, 1))
+                    }
+                    aria-label="Next month"
+                  >
+                    →
+                  </button>
                 </div>
               </div>
             </div>
 
-            <div className="form-grid">
-              <label>
-                <span>Tracking</span>
-                <select
-                  value={form.trackingMode}
-                  onChange={(event) =>
-                    setForm((current) => ({
-                      ...current,
-                      trackingMode: event.target.value as HabitTrackingMode,
-                    }))
-                  }
-                >
-                  <option value="check">Check-in</option>
-                  <option value="time">Time spent</option>
-                </select>
-              </label>
-
-              {form.trackingMode === 'time' ? (
-                <>
-                  <label>
-                    <span>Target / day</span>
-                    <input
-                      type="number"
-                      min="0"
-                      step="5"
-                      value={form.targetValue}
-                      onChange={(event) => setForm((current) => ({ ...current, targetValue: event.target.value }))}
-                      placeholder="60"
-                    />
-                  </label>
-
-                  <label>
-                    <span>Unit</span>
-                    <input
-                      value={form.targetUnit}
-                      onChange={(event) => setForm((current) => ({ ...current, targetUnit: event.target.value }))}
-                      placeholder="min"
-                    />
-                  </label>
-                </>
-              ) : null}
-            </div>
-
-            <button type="submit" className="primary-button">
-              {editingHabit ? 'Save changes' : 'Add habit'}
-            </button>
-          </form>
-
-          <div className="template-box">
-            <div className="section-heading">
-              <div>
-                <p className="eyebrow">Quick start</p>
-                <h3>One-tap templates</h3>
-              </div>
-            </div>
-
-            <div className="template-list">
-              {HABIT_TEMPLATES.map((template) => (
-                <button
-                  key={template.name}
-                  type="button"
-                  className="template-chip"
-                  onClick={() => addHabitFromTemplate(template)}
-                >
-                  <span>{template.icon}</span>
-                  {template.name}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div className="note-box">
-            <div className="section-heading">
-              <div>
-                <p className="eyebrow">Today focus</p>
-                <h3>Short daily note</h3>
-              </div>
-              <p className="muted">{todayKey}</p>
-            </div>
-
-            <textarea
-              value={storedState.notes[todayKey] ?? ''}
-              onChange={(event) => updateNote(event.target.value)}
-              placeholder="Write one line about today's priority."
-            />
-          </div>
-        </aside>
-
-        <section className="tracker-panel panel">
-          <div className="tracker-toolbar">
-            <div>
-              <p className="eyebrow">Month view</p>
-              <h2>{monthLabel}</h2>
-            </div>
-
-            <div className="toolbar-actions">
-              <button
-                type="button"
-                className="ghost-button"
-                onClick={() => setMonthAnchor(new Date(TODAY.getFullYear(), TODAY.getMonth(), 1))}
-              >
-                Current month
-              </button>
-              <div className="month-switcher">
-                <button
-                  type="button"
-                  className="ghost-button square"
-                  onClick={() =>
-                    setMonthAnchor((current) => new Date(current.getFullYear(), current.getMonth() - 1, 1))
-                  }
-                  aria-label="Previous month"
-                >
-                  ←
-                </button>
-                <button
-                  type="button"
-                  className="ghost-button square"
-                  onClick={() =>
-                    setMonthAnchor((current) => new Date(current.getFullYear(), current.getMonth() + 1, 1))
-                  }
-                  aria-label="Next month"
-                >
-                  →
-                </button>
-              </div>
-            </div>
-          </div>
-
-          <div className="tracker-table-wrap">
-            <table className="tracker-table">
-              <thead>
-                <tr>
-                  <th className="habit-column">My habits</th>
+            <div className="tracker-table-wrap">
+              <table className="tracker-table">
+                <thead>
+                  <tr>
+                    <th className="habit-column">My habits</th>
                   {monthDays.map((day) => (
                     <th key={formatDateKey(day)}>
                       <span>{day.toLocaleDateString('en-US', { weekday: 'short' }).slice(0, 2)}</span>
                       <strong>{day.getDate()}</strong>
                     </th>
                   ))}
-                </tr>
-              </thead>
-
-              <tbody>
-                {storedState.habits.map((habit) => (
-                  <tr key={habit.id}>
-                    <td className="habit-cell">
-                      <div className="habit-label">
-                        <span className="habit-color" style={{ backgroundColor: habit.color }} />
-                        <div>
-                          <strong>
-                            {habit.icon} {habit.name}
-                          </strong>
-                          <small>
-                            {habit.trackingMode === 'time'
-                              ? `${formatAmount(monthKeys.reduce((total, dateKey) => total + getHabitRecordedAmount(habit, dateKey), 0))} ${habit.targetUnit} logged`
-                              : `${countHabitDone(habit, monthKeys)} check-ins`}
-                          </small>
-                        </div>
-                      </div>
-
-                      <div className="habit-actions">
-                        <button
-                          type="button"
-                          className="edit-button"
-                          onClick={() => beginHabitEdit(habit.id)}
-                          aria-label={`Edit ${habit.name}`}
-                        >
-                          Edit
-                        </button>
-
-                        <button
-                          type="button"
-                          className="delete-button"
-                          onClick={() => deleteHabit(habit.id)}
-                          aria-label={`Delete ${habit.name}`}
-                        >
-                          ×
-                        </button>
-                      </div>
-                    </td>
-
-                    {monthKeys.map((dateKey) => {
-                      const entry = getHabitEntry(habit, dateKey)
-                      const checked = Boolean(entry)
-                      return (
-                        <td key={dateKey}>
-                          {habit.trackingMode === 'time' ? (
-                            <div className="time-cell">
-                              <input
-                                type="number"
-                                min="0"
-                                step="5"
-                                inputMode="numeric"
-                                value={typeof entry === 'number' ? entry : ''}
-                                onChange={(event) => updateDurationEntry(habit.id, dateKey, event.target.value)}
-                                aria-label={`Set time for ${habit.name} on ${dateKey}`}
-                                placeholder="0"
-                              />
-                              <span>{habit.targetUnit}</span>
-                            </div>
-                          ) : (
-                            <button
-                              type="button"
-                              className={checked ? 'check-button checked' : 'check-button'}
-                              onClick={() => toggleCompletion(habit.id, dateKey)}
-                              aria-pressed={checked}
-                              aria-label={`${checked ? 'Unmark' : 'Mark'} ${habit.name} for ${dateKey}`}
-                            >
-                              {checked ? '✓' : ''}
-                            </button>
-                          )}
-                        </td>
-                      )
-                    })}
                   </tr>
-                ))}
-              </tbody>
+                </thead>
 
-              <tfoot>
-                <tr>
-                  <td>Progress</td>
-                  {dailyRates.map((value, index) => (
-                    <td key={`${monthKeys[index]}-progress`}>{Math.round(value)}%</td>
+                <tbody>
+                  {storedState.habits.map((habit) => (
+                    <tr key={habit.id}>
+                      <td className="habit-cell">
+                        <div className="habit-label">
+                          <span className="habit-color" style={{ backgroundColor: habit.color }} />
+                          <div>
+                            <strong>
+                              {habit.icon} {habit.name}
+                            </strong>
+                            <small>
+                              {habit.trackingMode === 'time'
+                                ? `${formatAmount(monthKeys.reduce((total, dateKey) => total + getHabitRecordedAmount(habit, dateKey), 0))} ${habit.targetUnit} logged`
+                                : `${countHabitDone(habit, monthKeys)} check-ins`}
+                            </small>
+                            <HabitSubtaskPreview habit={habit} />
+                          </div>
+                        </div>
+
+                        <div className="habit-actions">
+                          <button
+                            type="button"
+                            className="edit-button"
+                            onClick={() => beginHabitEdit(habit.id)}
+                            aria-label={`Edit ${habit.name}`}
+                          >
+                            Edit
+                          </button>
+
+                          <button
+                            type="button"
+                            className="delete-button"
+                            onClick={() => deleteHabit(habit.id)}
+                            aria-label={`Delete ${habit.name}`}
+                          >
+                            ×
+                          </button>
+                        </div>
+                      </td>
+
+                      {monthKeys.map((dateKey) => {
+                        const entry = getHabitEntry(habit, dateKey)
+                        const checked = Boolean(entry)
+                        return (
+                          <td key={dateKey}>
+                            {habit.trackingMode === 'time' ? (
+                              <div className="time-cell">
+                                <input
+                                  type="number"
+                                  min="0"
+                                  step="5"
+                                  inputMode="numeric"
+                                  value={typeof entry === 'number' ? entry : ''}
+                                  onChange={(event) => updateDurationEntry(habit.id, dateKey, event.target.value)}
+                                  aria-label={`Set time for ${habit.name} on ${dateKey}`}
+                                  placeholder="0"
+                                />
+                                <span>{habit.targetUnit}</span>
+                              </div>
+                            ) : (
+                              <button
+                                type="button"
+                                className={checked ? 'check-button checked' : 'check-button'}
+                                onClick={() => toggleCompletion(habit.id, dateKey)}
+                                aria-pressed={checked}
+                                aria-label={`${checked ? 'Unmark' : 'Mark'} ${habit.name} for ${dateKey}`}
+                              >
+                                {checked ? '✓' : ''}
+                              </button>
+                            )}
+                          </td>
+                        )
+                      })}
+                    </tr>
                   ))}
-                </tr>
-                <tr>
-                  <td>Done</td>
-                  {dailyDoneCounts.map((value, index) => (
-                    <td key={`${monthKeys[index]}-done`}>{value}</td>
-                  ))}
-                </tr>
-                <tr>
-                  <td>Not done</td>
-                  {dailyDoneCounts.map((value, index) => (
-                    <td key={`${monthKeys[index]}-not-done`}>{Math.max(totalHabits - value, 0)}</td>
-                  ))}
-                </tr>
-              </tfoot>
-            </table>
-          </div>
+                </tbody>
+
+                <tfoot>
+                  <tr>
+                    <td>Progress</td>
+                    {dailyRates.map((value, index) => (
+                      <td key={`${monthKeys[index]}-progress`}>{Math.round(value)}%</td>
+                    ))}
+                  </tr>
+                  <tr>
+                    <td>Done</td>
+                    {dailyDoneCounts.map((value, index) => (
+                      <td key={`${monthKeys[index]}-done`}>{value}</td>
+                    ))}
+                  </tr>
+                  <tr>
+                    <td>Not done</td>
+                    {dailyDoneCounts.map((value, index) => (
+                      <td key={`${monthKeys[index]}-not-done`}>{Math.max(totalHabits - value, 0)}</td>
+                    ))}
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
 
           <div className="mobile-calendar">
             <div className="mobile-calendar-strip" aria-label={`${monthLabel} day selector`}>
@@ -1368,6 +1531,7 @@ function App() {
                                 ? `${formatAmount(typeof entry === 'number' ? entry : 0)} ${habit.targetUnit} today`
                                 : 'Enter time spent today'}
                             </small>
+                            <HabitSubtaskPreview habit={habit} />
                           </span>
                         </span>
 
@@ -1407,6 +1571,7 @@ function App() {
                               {habit.icon} {habit.name}
                             </strong>
                             <small>{checked ? 'Done today' : 'Tap the check to mark done'}</small>
+                            <HabitSubtaskPreview habit={habit} />
                           </span>
                         </span>
 
@@ -1439,68 +1604,291 @@ function App() {
           </div>
 
           <ProgressChart values={dailyRates} />
-        </section>
+          </section>
 
-        <aside className="insights-panel panel">
-          <div className="section-heading">
-            <div>
-              <p className="eyebrow">Analytics</p>
-              <h2>Progress snapshot</h2>
+          <aside className="insights-panel panel">
+            <div className="section-heading">
+              <div>
+                <p className="eyebrow">Analytics</p>
+                <h2>Progress snapshot</h2>
+              </div>
             </div>
-          </div>
 
-          <div className="progress-summary">
-            <div className="progress-meter">
-              <div className="progress-fill" style={{ width: `${progressPercent}%` }} />
+            <div className="progress-summary">
+              <div className="progress-meter">
+                <div className="progress-fill" style={{ width: `${progressPercent}%` }} />
+              </div>
+              <div className="summary-grid">
+                <article>
+                  <strong>{consistency.toFixed(0)}%</strong>
+                  <span>Consistency</span>
+                </article>
+                <article>
+                  <strong>{bestDayLabel}</strong>
+                  <span>Best day</span>
+                </article>
+                <article>
+                  <strong>{activeDays}</strong>
+                  <span>Active days</span>
+                </article>
+              </div>
             </div>
-            <div className="summary-grid">
-              <article>
-                <strong>{consistency.toFixed(0)}%</strong>
-                <span>Consistency</span>
-              </article>
-              <article>
-                <strong>{bestDayLabel}</strong>
-                <span>Best day</span>
-              </article>
-              <article>
-                <strong>{activeDays}</strong>
-                <span>Active days</span>
-              </article>
+
+            <div className="analysis-list">
+              {habitBreakdown.map((habit) => (
+                <article key={habit.id} className="analysis-row">
+                  <div className="analysis-copy">
+                    <strong>
+                      {habit.icon} {habit.name}
+                    </strong>
+                    <span>
+                      {habit.trackingMode === 'time'
+                        ? `${formatAmount(habit.totalAmount)} ${habit.targetUnit} total`
+                        : `${habit.done}/${monthDays.length} days`}
+                    </span>
+                  </div>
+                  <div className="mini-bar">
+                    <div className="mini-bar-fill" style={{ width: `${habit.rate}%`, backgroundColor: habit.color }} />
+                  </div>
+                </article>
+              ))}
+
+              {habitBreakdown.length === 0 ? <p className="muted">Add your first habit to start tracking.</p> : null}
             </div>
-          </div>
 
-          <div className="analysis-list">
-            {habitBreakdown.map((habit) => (
-              <article key={habit.id} className="analysis-row">
-                <div className="analysis-copy">
-                  <strong>
-                    {habit.icon} {habit.name}
-                  </strong>
-                  <span>
-                    {habit.trackingMode === 'time'
-                      ? `${formatAmount(habit.totalAmount)} ${habit.targetUnit} total`
-                      : `${habit.done}/${monthDays.length} days`}
-                  </span>
-                </div>
-                <div className="mini-bar">
-                  <div className="mini-bar-fill" style={{ width: `${habit.rate}%`, backgroundColor: habit.color }} />
-                </div>
-              </article>
-            ))}
+            <div className="neon-box">
+              <p className="eyebrow">Backend note</p>
+              <h3>Neon database is wired through the backend.</h3>
+              <p className="muted">
+                The app now loads and saves habit state through a Postgres API, with local cache fallback if the
+                backend is unavailable.
+              </p>
+            </div>
+          </aside>
+        </div>
 
-            {habitBreakdown.length === 0 ? <p className="muted">Add your first habit to start tracking.</p> : null}
-          </div>
-
-          <div className="neon-box">
-            <p className="eyebrow">Backend note</p>
-            <h3>Neon database is wired through the backend.</h3>
-            <p className="muted">
-              The app now loads and saves habit state through a Postgres API, with local cache fallback if the
-              backend is unavailable.
-            </p>
-          </div>
+        <aside className="weak-column side-rail">
+          <WeakList items={storedState.weakList} onDeleteItem={deleteWeakListItem} />
+          <ConqueredList items={storedState.conqueredList} onRestoreItem={restoreConqueredItem} />
         </aside>
       </main>
+
+      {isSetupDrawerOpen ? (
+        <div className="setup-drawer-layer">
+          <button
+            type="button"
+            className="setup-drawer-backdrop"
+            onClick={closeSetupDrawer}
+            aria-label="Close setup drawer"
+          />
+
+          <aside className="setup-drawer" role="dialog" aria-modal="true" aria-labelledby="setup-drawer-title">
+            <div className="drawer-header">
+              <div>
+                <p className="eyebrow">Right drawer</p>
+                <h2 id="setup-drawer-title">Create or plan habits</h2>
+                <p className="muted">Add today&apos;s habit or save a future improvement in the Weak List.</p>
+              </div>
+
+              <button type="button" className="drawer-close" onClick={closeSetupDrawer} aria-label="Close drawer">
+                ×
+              </button>
+            </div>
+
+            <section className="drawer-card">
+              <div className="section-heading">
+                <div>
+                  <p className="eyebrow">{editingHabit ? 'Edit a task' : 'Add a task'}</p>
+                  <h3>{editingHabit ? `Editing ${editingHabit.name}` : 'Create a new habit'}</h3>
+                </div>
+                {editingHabit ? (
+                  <button type="button" className="ghost-button" onClick={cancelHabitEdit}>
+                    Cancel edit
+                  </button>
+                ) : null}
+              </div>
+
+              <form className="habit-form" onSubmit={handleHabitFormSubmit}>
+                <label>
+                  <span>Habit name</span>
+                  <input
+                    value={form.name}
+                    onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))}
+                    placeholder="Example: No sugar"
+                  />
+                </label>
+
+                <section className="task-structure-panel" aria-label="Task structure">
+                  <div className="task-structure-header">
+                    <div>
+                      <span className="label-title">Task structure</span>
+                      <p className="muted">Choose whether this is one trackable habit or a larger task with steps.</p>
+                    </div>
+                    <span className="task-structure-count">
+                      {form.isMajorTask ? `${normalizeSubtasks(form.subtasks).length} steps` : 'Simple'}
+                    </span>
+                  </div>
+
+                  <div className="task-type-grid">
+                    <button
+                      type="button"
+                      className={form.isMajorTask ? 'task-type-card' : 'task-type-card active'}
+                      onClick={() => setMajorTaskMode(false)}
+                      aria-pressed={!form.isMajorTask}
+                    >
+                      <span>Single</span>
+                      <strong>Habit</strong>
+                      <small>One behavior, one tracker row.</small>
+                    </button>
+                    <button
+                      type="button"
+                      className={form.isMajorTask ? 'task-type-card active' : 'task-type-card'}
+                      onClick={() => setMajorTaskMode(true)}
+                      aria-pressed={form.isMajorTask}
+                    >
+                      <span>Major</span>
+                      <strong>Task</strong>
+                      <small>One main task with steps below.</small>
+                    </button>
+                  </div>
+
+                  {form.isMajorTask ? (
+                    <div className="subtask-composer">
+                      <div className="subtask-composer-header">
+                        <div>
+                          <span>Build the step list</span>
+                          <small>Each row becomes one subtask in the accordion.</small>
+                        </div>
+                        <button type="button" className="subtask-add-button" onClick={addSubtaskField}>
+                          Add step
+                        </button>
+                      </div>
+
+                      <div className="subtask-card-list">
+                        {form.subtasks.map((subtask, index) => (
+                          <div key={`subtask-${index}`} className="subtask-card">
+                            <span className="subtask-step">Step {String(index + 1).padStart(2, '0')}</span>
+                            <input
+                              value={subtask}
+                              onChange={(event) => updateSubtask(index, event.target.value)}
+                              placeholder={
+                                index === 0
+                                  ? 'Research the topic'
+                                  : index === 1
+                                    ? 'Create the first draft'
+                                    : 'Define the next clear action'
+                              }
+                            />
+                            <button
+                              type="button"
+                              className="subtask-remove"
+                              onClick={() => removeSubtaskField(index)}
+                              aria-label={`Remove step ${index + 1}`}
+                            >
+                              ×
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="task-structure-note">
+                      Use Major Task only when you need a checklist under the main tracker item.
+                    </div>
+                  )}
+                </section>
+
+                <div className="form-row">
+                  <label>
+                    <span>Icon</span>
+                    <input
+                      value={form.icon}
+                      onChange={(event) => setForm((current) => ({ ...current, icon: event.target.value }))}
+                      maxLength={2}
+                      placeholder="✨"
+                    />
+                  </label>
+
+                  <div>
+                    <span className="label-title">Color</span>
+                    <div className="swatches" role="list" aria-label="Habit colors">
+                      {COLOR_SWATCHES.map((color) => (
+                        <button
+                          key={color}
+                          type="button"
+                          className={form.color === color ? 'swatch active' : 'swatch'}
+                          style={{ backgroundColor: color }}
+                          onClick={() => setForm((current) => ({ ...current, color }))}
+                          aria-label={`Select ${color}`}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="form-grid">
+                  <label>
+                    <span>Tracking</span>
+                    <select
+                      value={form.trackingMode}
+                      onChange={(event) =>
+                        setForm((current) => ({
+                          ...current,
+                          trackingMode: event.target.value as HabitTrackingMode,
+                        }))
+                      }
+                    >
+                      <option value="check">Check-in</option>
+                      <option value="time">Time spent</option>
+                    </select>
+                  </label>
+
+                  {form.trackingMode === 'time' ? (
+                    <>
+                      <label>
+                        <span>Target / day</span>
+                        <input
+                          type="number"
+                          min="0"
+                          step="5"
+                          value={form.targetValue}
+                          onChange={(event) => setForm((current) => ({ ...current, targetValue: event.target.value }))}
+                          placeholder="60"
+                        />
+                      </label>
+
+                      <label>
+                        <span>Unit</span>
+                        <input
+                          value={form.targetUnit}
+                          onChange={(event) => setForm((current) => ({ ...current, targetUnit: event.target.value }))}
+                          placeholder="min"
+                        />
+                      </label>
+                    </>
+                  ) : null}
+                </div>
+
+                <button type="submit" className="primary-button">
+                  {editingHabit ? 'Save changes' : 'Add habit'}
+                </button>
+
+                {editingHabit ? (
+                  <button
+                    type="button"
+                    className="conquer-button"
+                    onClick={() => conquerHabit(editingHabit.id)}
+                  >
+                    Move to Conquered
+                  </button>
+                ) : null}
+              </form>
+            </section>
+
+            <WeakListEditor onAddItem={addWeakListItem} />
+          </aside>
+        </div>
+      ) : null}
     </div>
   )
 }

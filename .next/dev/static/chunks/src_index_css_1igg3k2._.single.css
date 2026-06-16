@@ -1,0 +1,80 @@
+/* [project]/src/index.css [app-client] (css) */
+:root {
+  --font-display: "Space Grotesk", sans-serif;
+  --font-body: "Plus Jakarta Sans", sans-serif;
+  --accent: #9cdb78;
+  --accent-strong: #72bf52;
+}
+
+body[data-theme="dark"], :root {
+  --page-bg: #0b0f14;
+  --surface: #10151dd1;
+  --border: #ffffff14;
+  --heading: #f4f7f1;
+  --body: #c6d0cb;
+  --muted: #8a9690;
+  --shadow: 0 24px 80px #0000005c,
+    0 8px 24px #00000042;
+  color: var(--body);
+  background: radial-gradient(circle at 0 0, #72bf522e, #0000 28%), radial-gradient(circle at 100% 0, #4c7bff24, #0000 26%), linear-gradient(#0e131a 0%, #090c11 100%);
+}
+
+body[data-theme="light"] {
+  --page-bg: #f4efe4;
+  --surface: #fffbf5e6;
+  --border: #232f2914;
+  --heading: #1f2a20;
+  --body: #3f4d44;
+  --muted: #6a776f;
+  --shadow: 0 24px 80px #483d2414,
+    0 8px 24px #1e23180f;
+  color: var(--body);
+  background: radial-gradient(circle at 0 0, #f8b94d2e, #0000 28%), radial-gradient(circle at 100% 0, #70d6c329, #0000 26%), linear-gradient(#f6f2e8 0%, #efe8d8 100%);
+}
+
+:root, body {
+  font-family: var(--font-body);
+  font-synthesis: none;
+  text-rendering: optimizelegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-weight: 500;
+  line-height: 1.5;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background: var(--page-bg);
+  min-width: 320px;
+  margin: 0;
+}
+
+body, button, input, textarea {
+  font-family: var(--font-body);
+}
+
+button, input, textarea {
+  appearance: none;
+}
+
+img, svg {
+  max-width: 100%;
+  display: block;
+}
+
+a {
+  color: inherit;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+/*# sourceMappingURL=src_index_css_1igg3k2._.single.css.map*/
